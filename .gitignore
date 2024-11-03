@@ -1,0 +1,7 @@
+# Rust
+/target/
+
+# Other
+*.override.yml
+.env
+/data/*

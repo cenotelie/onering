@@ -1,0 +1,20 @@
+[package]
+name = "disruptor"
+version = "1.0.0"
+authors = ["Laurent Wouters <lwouters@cenotelie.fr>"]
+description = "High throughput synchronous channels"
+repository = "https://github.com/cenotelie/disruptor"
+homepage = "https://github.com/cenotelie/disruptor"
+documentation = "https://github.com/cenotelie/disruptor"
+license = "MIT"
+edition = "2021"
+
+[features]
+default = ["std"]
+std = ["crossbeam-utils/std"]
+
+[dependencies]
+crossbeam-utils = { version = "0.8" }
+
+[dev-dependencies]
+crossbeam = {version = "0.8"}
