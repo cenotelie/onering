@@ -2,284 +2,583 @@
  * Copyright (c) 2024 Cénotélie Opérations SAS (cenotelie.fr)
  ******************************************************************************/
 
-//! Implementation of a circular queue for channels
+//! Disruptor-inspired queue
 
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::fmt::Debug;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::ops::{Deref, Range};
+use core::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 
-use crossbeam_utils::Backoff;
+use crossbeam_utils::{Backoff, CachePadded};
 
-use crate::errors::{RecvError, SendError, TryRecvError, TrySendError};
+use crate::errors::{TryRecvError, TrySendError};
 
-/// A slot in a queue
+/// A barrier to be waited on by either a producer or a consumer
 #[derive(Debug)]
-pub struct Slot<T> {
-    content: UnsafeCell<MaybeUninit<T>>,
-    state: AtomicUsize,
+pub struct Barrier {
+    /// The wrapped cusor
+    cursor: CachePadded<AtomicIsize>,
 }
 
-/// SAFETY: This is safe because the `content` of the slot is only accessed when after checking the `state`
-unsafe impl<T> Sync for Slot<T> {}
-
-/// A circular queue, to be accessed using cursors
-/// A queue is expected to be accessed by only two threads, one for pushing items, the other for popping them.
-#[derive(Debug)]
-pub struct QueueSlots<T> {
-    /// The buffer containing the slots themselves
-    buffer: Box<[Slot<T>]>,
-    /// The mask to use for getting an index with the buffer
-    mask: usize,
+impl Default for Barrier {
+    fn default() -> Self {
+        Self {
+            cursor: CachePadded::new(AtomicIsize::new(-1)),
+        }
+    }
 }
 
-impl<T> Drop for QueueSlots<T> {
+impl Barrier {
+    /// Gets the published value using `Relaxed`
+    #[must_use]
+    #[inline]
+    pub fn published(&self) -> isize {
+        self.cursor.load(Ordering::Acquire)
+    }
+
+    /// Write to the barrier to publish an event
+    #[inline]
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn write(&self, value: usize) {
+        self.cursor.store(value as isize, Ordering::Release);
+    }
+}
+
+/// The user of a queue
+pub trait QueueUser {
+    /// Gets the barrier that can be awaited on for items that are available *after* this user
+    fn publication_barrier(&self) -> Arc<Barrier>;
+}
+
+/// A producer which is unique to a queue
+#[derive(Debug)]
+pub struct SingleProducer<T> {
+    /// The identifier of the next message to be inserted in the queue
+    next: usize,
+    /// The owned barrier used to signal when an item is published
+    publish: Arc<Barrier>,
+    /// The ring itself
+    pub ring: Arc<RingBuffer<T>>,
+}
+
+impl<T> QueueUser for SingleProducer<T> {
+    #[inline]
+    fn publication_barrier(&self) -> Arc<Barrier> {
+        self.publish.clone()
+    }
+}
+
+impl<T> SingleProducer<T> {
+    /// Gets the number of items in the queue
+    #[must_use]
+    #[inline]
+    pub fn get_number_of_items(&self) -> usize {
+        let consumers_min = self.ring.get_last_seen_by_all_blocking_consumers(self.next);
+        self.next - if consumers_min < 0 { 0 } else { consumers_min.unsigned_abs() }
+    }
+
+    /// Attempts to push a single item onto the queue
+    ///
+    /// # Errors
+    ///
+    /// This returns a `TrySendError` when the queue is full or there no longer are any consumer
+    pub fn try_push(&mut self, item: T) -> Result<(), TrySendError<T>> {
+        let consumers_min = self.ring.get_last_seen_by_all_blocking_consumers(self.next);
+        let current_count = self.next - if consumers_min < 0 { 0 } else { consumers_min.unsigned_abs() };
+        if current_count >= self.ring.buffer.len() {
+            // buffer is full
+            if self.ring.get_connected_consumers() == 0 {
+                return Err(TrySendError::Disconnected(item));
+            }
+            return Err(TrySendError::Full(item));
+        }
+        // write
+        self.ring.write_slot(self.next, item);
+        self.publish.write(self.next);
+        self.next += 1;
+        Ok(())
+    }
+
+    /// Attempts to push multiple items coming from an iterator into the queue
+    ///
+    /// # Errors
+    ///
+    /// This returns a `TrySendError` when the queue is full or there no longer are any consumer when no item at all could be pushed
+    pub fn try_push_iterator<I>(&mut self, provider: &mut I) -> Result<usize, TrySendError<()>>
+    where
+        I: Iterator<Item = T>,
+    {
+        let consumers_min = self.ring.get_last_seen_by_all_blocking_consumers(self.next);
+        let current_count = self.next - if consumers_min < 0 { 0 } else { consumers_min.unsigned_abs() };
+        let buffer_len = self.ring.buffer.len();
+        if current_count >= buffer_len {
+            // buffer is full
+            if self.ring.get_connected_consumers() == 0 {
+                return Err(TrySendError::Disconnected(()));
+            }
+            return Err(TrySendError::Full(()));
+        }
+        let free = buffer_len - current_count;
+        let mut pushed = 0;
+        for _ in 0..free {
+            if let Some(item) = provider.next() {
+                self.ring.write_slot(self.next, item);
+                self.next += 1;
+                pushed += 1;
+            } else {
+                break;
+            }
+        }
+        if pushed == 0 {
+            println!("nodata");
+            Err(TrySendError::NoData)
+        } else {
+            self.publish.write(self.next);
+            Ok(pushed)
+        }
+    }
+}
+
+/// A producer for a queue that can be concurrent with other (concurrent) producers
+///
+/// # Safety
+///
+/// Cloning this producer to get a new one is safe only after all consumers have been added.
+/// Otherwise, some producer will not wait on all required consumers.
+#[derive(Debug, Clone)]
+pub struct ConcurrentProducer<T> {
+    /// The identifier of the next message to be inserted in the queue
+    next: Arc<CachePadded<AtomicUsize>>,
+    /// The owned barrier used to signal when an item is published
+    publish: Arc<Barrier>,
+    /// The ring itself
+    pub ring: Arc<RingBuffer<T>>,
+}
+
+impl<T> QueueUser for ConcurrentProducer<T> {
+    #[inline]
+    fn publication_barrier(&self) -> Arc<Barrier> {
+        self.publish.clone()
+    }
+}
+
+impl<T> ConcurrentProducer<T> {
+    /// Gets the number of items in the queue
+    #[must_use]
+    #[inline]
+    pub fn get_number_of_items(&self) -> usize {
+        let next = self.next.load(Ordering::Acquire);
+        let consumers_min = self.ring.get_last_seen_by_all_blocking_consumers(next);
+        next - if consumers_min < 0 { 0 } else { consumers_min.unsigned_abs() }
+    }
+
+    /// Attempts to push a single item onto the queue
+    ///
+    /// # Errors
+    ///
+    /// This returns a `TrySendError` when the queue is full or there no longer are any consumer
+    pub fn try_push(&mut self, item: T) -> Result<(), TrySendError<T>> {
+        let backoff = Backoff::new();
+        let mut next = self.next.load(Ordering::Acquire);
+        let consumers_min = self.ring.get_last_seen_by_all_blocking_consumers(next);
+
+        loop {
+            let current_count = next - if consumers_min < 0 { 0 } else { consumers_min.unsigned_abs() };
+            if current_count >= self.ring.buffer.len() {
+                // buffer is full
+                if self.ring.get_connected_consumers() == 0 {
+                    return Err(TrySendError::Disconnected(item));
+                }
+                return Err(TrySendError::Full(item));
+            }
+
+            // try to acquire
+            if let Err(real_next) = self
+                .next
+                .compare_exchange_weak(next, next + 1, Ordering::AcqRel, Ordering::Relaxed)
+            {
+                next = real_next;
+                backoff.spin(); // wait a bit
+                continue;
+            }
+
+            // write
+            self.ring.write_slot(next, item);
+
+            // publish
+            #[allow(clippy::cast_possible_wrap)]
+            let next_signed = next as isize;
+            while self
+                .publish
+                .cursor
+                .compare_exchange_weak(next_signed - 1, next_signed, Ordering::AcqRel, Ordering::Relaxed)
+                .is_err()
+            {
+                // wait for other producers to write and publish
+                backoff.spin();
+            }
+            return Ok(());
+        }
+    }
+}
+
+/// The blocking mode for a consumer
+/// Blocking consumers prevent producers from writing new items in the queue that would replace items not already seen by the consumer.
+/// On the contrary, non-blocking consumers do not block producers, enabling producers to still write onto the queue.
+/// Non-blocking consumers then run the risk of lagging behind. In that case trying to receive messages will produce `TryRecvError::Lagging`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConsumerMode {
+    /// In `Blocking` mode, a consumer is guaranteed to see all items from producers
+    #[default]
+    Blocking,
+    /// In `NonBlocking` mode, a consumer may lag behind producers and may not see all items from producers
+    NonBlocking,
+}
+
+/// A consumer of items from the queue
+#[derive(Debug)]
+pub struct Consumer<T> {
+    /// Whether the consumer blocks producers
+    mode: ConsumerMode,
+    /// The identifier of the expected next message
+    next: usize,
+    /// The barrier the consumer is waiting on
+    waiting_on: Arc<Barrier>,
+    /// The owned barrier used to signal when an item has been handled by the consumer
+    publish: Arc<Barrier>,
+    /// The ring itself
+    pub ring: Arc<RingBuffer<T>>,
+    /// The value shared by all consumers, used to keep track of connected consumers
+    _shared: Arc<usize>,
+}
+
+impl<T> QueueUser for Consumer<T> {
+    #[inline]
+    fn publication_barrier(&self) -> Arc<Barrier> {
+        self.publish.clone()
+    }
+}
+
+impl<T> Clone for Consumer<T> {
+    fn clone(&self) -> Self {
+        self.ring.add_consumer(self.waiting_on.clone(), Some(self.mode))
+    }
+}
+
+/// An access to items from the queue through a consumer
+pub struct ConsumerAccess<'a, T> {
+    /// The parent consumer
+    parent: &'a Consumer<T>,
+    /// The identifier if the last item in this batch
+    last_id: usize,
+    /// The reference to the item itself
+    items: &'a [T],
+}
+
+impl<'a, T> Deref for ConsumerAccess<'a, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        self.items
+    }
+}
+
+impl<'a, T> Drop for ConsumerAccess<'a, T> {
     fn drop(&mut self) {
-        if core::mem::needs_drop::<T>() {
-            let slots_count = self.buffer.len();
-            for (index, slot) in self.buffer.iter_mut().enumerate() {
-                // no need to use atomic primitives since we got exclusive access
-                let state = *slot.state.get_mut();
-                let flag = (state - index) % slots_count;
-                if flag != 0 {
-                    // not free, need to drop the item
-                    unsafe {
-                        slot.content.get_mut().assume_init_drop();
-                    }
-                }
-            }
-        }
+        self.parent.publish.write(self.last_id);
     }
 }
 
-impl<T> QueueSlots<T> {
-    /// Creates a circular queue with the specified size
-    pub fn new(size: usize) -> QueueSlots<T> {
-        assert!(size.is_power_of_two(), "size must be power of two, got {size}");
-        let buffer = (0..size)
-            .map(|i| Slot {
-                state: AtomicUsize::new(i),
-                content: UnsafeCell::new(MaybeUninit::uninit()),
-            })
-            .collect::<Box<[_]>>();
-        Self { buffer, mask: size - 1 }
+impl<T> Consumer<T> {
+    /// Whether this consumer blocks producers
+    /// By default, consumers block producers writing new items when they have not yet be seen.
+    /// Setting a consumer as non-blocking enable producers to write event though the consumer may be lagging.
+    #[must_use]
+    pub fn blocking_mode(&self) -> ConsumerMode {
+        self.mode
     }
 
-    /// Gets the capacity of the queue
+    /// Gets the number of items in the queue accessible to this consumer
+    #[must_use]
     #[inline]
-    pub fn capacity(&self) -> usize {
-        self.buffer.len()
-    }
-
-    /// Gets the nunmber of messages actually in the queue using the cursor to push new items
-    pub fn count_with_push_cursor(&self, cursor: usize) -> usize {
-        let mut index = cursor;
-        let mut count = 0;
-        while count < self.buffer.len() {
-            let state = unsafe { self.buffer.get_unchecked(index & self.mask) }
-                .state
-                .load(Ordering::Acquire);
-            if state != index + 1 {
-                // not an occupied slot, stop
-                return count;
-            }
-            // continue
-            if index == 0 {
-                break;
-            }
-            index -= 1;
-            count += 1;
+    pub fn get_number_of_items(&self) -> usize {
+        let published = self.waiting_on.published();
+        if published < 0 {
+            // no item was pushed onto the queue
+            return 0;
         }
-        count
-    }
-
-    /// Gets the nunmber of messages actually in the queue using the cursor to pop items
-    pub fn count_with_pop_cursor(&self, cursor: usize) -> usize {
-        let mut index = cursor;
-        let mut count = 0;
-        while count < self.buffer.len() {
-            let state = unsafe { self.buffer.get_unchecked(index & self.mask) }
-                .state
-                .load(Ordering::Acquire);
-            if state != index + 1 {
-                // not an occupied slot, stop
-                return count;
-            }
-            // continue
-            index += 1;
-            count += 1;
+        let published = published.unsigned_abs();
+        if self.next > published {
+            // no item for this consumer
+            return 0;
         }
-        count
+        published - self.next + 1
     }
 
-    /// Determines whether the queue is empty using the cursor to push new items
-    pub fn is_empty_with_push_cursor(&self, cursor: usize) -> bool {
-        let mut index = cursor;
-        let mut count = 0;
-        while count < self.buffer.len() {
-            let state = unsafe { self.buffer.get_unchecked(index & self.mask) }
-                .state
-                .load(Ordering::Acquire);
-            if state == index + 1 {
-                // not free
-                return false;
-            }
-            // continue
-            if index == 0 {
-                index = self.buffer.len() - 1;
-            } else {
-                index -= 1;
-            }
-            count += 1;
+    /// Attempts to receive a single item from the queue
+    ///
+    /// # Errors
+    ///
+    /// This returns a `TryRecvError` when the queue is empty, or when there is no longer any producer
+    pub fn try_recv(&mut self) -> Result<ConsumerAccess<'_, T>, TryRecvError> {
+        let published = self.waiting_on.published();
+        if published < 0 {
+            // no item was pushed onto the queue
+            return Err(TryRecvError::Empty);
         }
-        true
-    }
-
-    /// Determines whether the queue is empty using the cursor to pop items
-    #[inline]
-    pub fn is_empty_with_pop_cursor(&self, cursor: usize) -> bool {
-        let state = unsafe { self.buffer.get_unchecked(cursor & self.mask) }
-            .state
-            .load(Ordering::Acquire);
-        state == cursor // slot is free => queue is empty
-    }
-
-    /// Determines whether the queue is full using the cursor to push new items
-    #[inline]
-    pub fn is_full_with_push_cursor(&self, cursor: usize) -> bool {
-        let state = unsafe { self.buffer.get_unchecked(cursor & self.mask) }
-            .state
-            .load(Ordering::Acquire);
-        state != cursor // slot is not free => queue is full
-    }
-
-    /// Determines whether the queue is full using the cursor to pop items
-    pub fn is_full_with_pop_cursor(&self, cursor: usize) -> bool {
-        let mut index = cursor;
-        let mut count = 0;
-        while count < self.buffer.len() {
-            let state = unsafe { self.buffer.get_unchecked(index & self.mask) }
-                .state
-                .load(Ordering::Acquire);
-            if state != index + 1 {
-                // free => queue is nor full
-                return false;
-            }
-            // continue
-            index += 1;
-            count += 1;
+        let published = published.unsigned_abs();
+        if published < self.next {
+            // still waiting
+            return Err(TryRecvError::Empty);
         }
-        true
+        if published >= self.next + self.ring.buffer.len() {
+            // lagging
+            return Err(TryRecvError::Lagging(published - self.next + 1));
+        }
+        // some item are ready
+        let end_of_ring = self.next | self.ring.mask;
+        let last_id = end_of_ring.min(published);
+        #[allow(clippy::range_plus_one)]
+        let items = self
+            .ring
+            .get_slots((self.next & self.ring.mask)..((last_id & self.ring.mask) + 1));
+        self.next = last_id + 1;
+        Ok(ConsumerAccess {
+            parent: self,
+            last_id,
+            items,
+        })
     }
 
-    /// Attempts to push an item using the specified cursor
-    pub fn try_push(self: &Arc<Self>, cursor: &mut usize, item: T) -> Result<(), TrySendError<T>> {
-        let slot = unsafe { self.buffer.get_unchecked(*cursor & self.mask) };
-        let slot_state = slot.state.load(Ordering::Acquire);
-        if slot_state == *cursor {
-            // slot is available
-            unsafe { slot.content.get().write(MaybeUninit::new(item)) };
-            // make it available to read
-            slot.state.store(*cursor + 1, Ordering::Release);
-            *cursor += 1;
-            Ok(())
-        } else {
-            // slot is full => queue is full
-            Err(if Arc::strong_count(self) == 1 {
-                TrySendError::Disconnected(item)
-            } else {
-                TrySendError::Full(item)
-            })
+    /// Attempts to receive a single item from the queue
+    ///
+    /// # Errors
+    ///
+    /// This returns a `TryRecvError` when the queue is empty, or when there is no longer any producer
+    pub fn try_recv_copies(&mut self, buffer: &mut [T]) -> Result<usize, TryRecvError>
+    where
+        T: Copy,
+    {
+        let published = self.waiting_on.published();
+        if published < 0 {
+            // no item was pushed onto the queue
+            return Err(TryRecvError::Empty);
         }
-    }
-
-    /// Blocks while pushing an item using the specified cursor
-    pub fn push(self: &Arc<Self>, cursor: &mut usize, mut item: T) -> Result<(), SendError<T>> {
-        let backoff = Backoff::new();
-        loop {
-            match self.try_push(cursor, item) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Disconnected(item)) => return Err(SendError(item)),
-                Err(TrySendError::Full(item_back)) => {
-                    item = item_back;
-                    // queue is full, we need to wait for another thread to make progress
-                    backoff.snooze();
-                }
-            }
+        let published = published.unsigned_abs();
+        if published < self.next {
+            // still waiting
+            return Err(TryRecvError::Empty);
         }
-    }
-
-    /// Attempts to pop an item using the specified cursor
-    pub fn try_pop(self: &Arc<Self>, cursor: &mut usize) -> Result<T, TryRecvError> {
-        let slot = unsafe { self.buffer.get_unchecked(*cursor & self.mask) };
-        let slot_state = slot.state.load(Ordering::Acquire);
-        if slot_state == *cursor + 1 {
-            // slot has content
-            let item = unsafe { slot.content.get().read().assume_init() };
-            // make it available to write again on next cycle
-            slot.state.store(*cursor + self.buffer.len(), Ordering::Release);
-            *cursor += 1;
-            Ok(item)
-        } else {
-            // slot is empty => queue is empty
-            Err(if Arc::strong_count(self) == 1 {
-                TryRecvError::Disconnected
-            } else {
-                TryRecvError::Empty
-            })
+        if published >= self.next + self.ring.buffer.len() {
+            // lagging
+            return Err(TryRecvError::Lagging(published - self.next + 1));
         }
-    }
-
-    /// Blocks while getting the next item using the specified cursor
-    pub fn pop(self: &Arc<Self>, cursor: &mut usize) -> Result<T, RecvError> {
-        let backoff = Backoff::new();
-        loop {
-            match self.try_pop(cursor) {
-                Ok(item) => return Ok(item),
-                Err(TryRecvError::Disconnected) => return Err(RecvError),
-                Err(TryRecvError::Empty) => {
-                    // queue is empty, we need to wait for another thread to make progress
-                    backoff.snooze();
-                }
-            }
-        }
-    }
-
-    /// Drains the content of the queue using the cursor for pushing items
-    pub fn drain_with_push_cursor(self: Arc<Self>, cursor: usize, buffer: &mut Vec<T>) -> Result<usize, Arc<Self>> {
-        if Arc::strong_count(&self) != 1 {
-            return Err(self);
-        }
-        let mut index = cursor;
-        let mut count = 0;
-        while count < self.buffer.len() {
-            let slot = unsafe { self.buffer.get_unchecked(index & self.mask) };
-            let state = slot.state.load(Ordering::Acquire);
-            if state != index + 1 {
-                // no data in slot => stop here
-                return Ok(count);
-            }
-            // data is in slot
-            let item = unsafe { slot.content.get().read().assume_init() };
-            buffer.push(item);
-            // continue
-            if index == 0 {
-                break;
-            }
-            index -= 1;
-            count += 1;
-        }
+        // some item are ready
+        let end_of_buffer = self.next + buffer.len() - 1;
+        let end_of_ring = self.next | self.ring.mask;
+        let last_id = published.min(end_of_buffer).min(end_of_ring);
+        let count = last_id - self.next + 1;
+        #[allow(clippy::range_plus_one)]
+        let items = self
+            .ring
+            .get_slots((self.next & self.ring.mask)..((last_id & self.ring.mask) + 1));
+        buffer[..count].copy_from_slice(items);
+        self.next = last_id + 1;
+        self.publish.write(last_id);
         Ok(count)
     }
 }
 
+/// A circular queue to be accessed by producer(s) and consumers
+#[derive(Debug)]
+pub struct RingBuffer<T> {
+    /// The buffer containing the items themselves
+    buffer: Box<[UnsafeCell<MaybeUninit<T>>]>,
+    /// The mask to use for getting an index with the buffer
+    pub(crate) mask: usize,
+    /// The barrier enabling awaiting on the producer(s)
+    producers_barrier: Arc<Barrier>,
+    /// The value shared by all consumers, used to keep track of connected consumers
+    consumers_shared: Arc<usize>,
+    /// The barriers associated to consumers so that the queue can know when an item has been used by all consumers
+    consumer_barriers: UnsafeCell<Vec<Arc<Barrier>>>,
+}
+
+/// SAFETY: The implementation guards the access to elements, this is fine for as long as `T` is itself `Sync`
+unsafe impl<T> Sync for RingBuffer<T> where T: Sync {}
+
+impl<T> Drop for RingBuffer<T> {
+    fn drop(&mut self) {
+        if core::mem::needs_drop::<T>() {
+            // we need to drop all the items in the buffer
+            let published = self.producers_barrier.published();
+            if published < 0 {
+                return;
+            }
+            let count = self.buffer.len().min(published.unsigned_abs() + 1);
+            for slot in &mut self.buffer[..count] {
+                unsafe {
+                    slot.get_mut().assume_init_drop();
+                }
+            }
+        }
+    }
+}
+
+impl<T> RingBuffer<T> {
+    /// Builds a single producer queue
+    #[must_use]
+    pub fn new_single_producer(queue_size: usize) -> SingleProducer<T> {
+        let producer_barrier = Arc::new(Barrier::default());
+        let ring = Arc::new(Self::new(producer_barrier.clone(), queue_size));
+        SingleProducer {
+            next: 0,
+            publish: producer_barrier,
+            ring,
+        }
+    }
+
+    /// Builds a queue that support multiple producers
+    #[must_use]
+    pub fn new_multi_producers(queue_size: usize) -> ConcurrentProducer<T> {
+        let producer_barrier = Arc::new(Barrier::default());
+        let ring = Arc::new(Self::new(producer_barrier.clone(), queue_size));
+        ConcurrentProducer {
+            next: Arc::new(CachePadded::new(AtomicUsize::new(0))),
+            publish: producer_barrier,
+            ring,
+        }
+    }
+
+    /// Creates a new buffer
+    fn new(producers_barrier: Arc<Barrier>, queue_size: usize) -> Self {
+        assert!(queue_size.is_power_of_two(), "size must be power of two");
+        let buffer = (0..queue_size)
+            .map(|_i| UnsafeCell::new(MaybeUninit::uninit()))
+            .collect::<Box<[_]>>();
+        Self {
+            buffer,
+            mask: queue_size - 1,
+            producers_barrier,
+            consumers_shared: Arc::new(0),
+            consumer_barriers: UnsafeCell::new(Vec::new()),
+        }
+    }
+
+    /// Gets an access to the consumer publishing barriers
+    fn get_consumer_barriers(&self) -> &Vec<Arc<Barrier>> {
+        unsafe { &*self.consumer_barriers.get() }
+    }
+
+    /// Registers the publishing barrier of a consumer
+    fn add_consumer_barrier(&self, barrier: Arc<Barrier>) {
+        let consumer_barriers = unsafe { &mut *self.consumer_barriers.get() };
+        consumer_barriers.push(barrier);
+    }
+
+    /// Gets an access to a slice of slots from the backing buffer
+    #[inline]
+    fn get_slots(&self, range: Range<usize>) -> &[T] {
+        unsafe {
+            (core::ptr::from_ref(self.buffer.get_unchecked(range)) as *const [T]) // assume init
+                .as_ref()
+                .unwrap()
+        }
+    }
+
+    /// Overwrites an item to a slot
+    #[inline]
+    fn write_slot(&self, index: usize, item: T) {
+        let slot = unsafe { self.buffer.get_unchecked(index & self.mask).get() };
+        if core::mem::needs_drop::<T>() && index >= self.buffer.len() {
+            // drop the previous value
+            unsafe {
+                slot.as_mut().unwrap().assume_init_drop();
+            }
+        }
+        unsafe {
+            slot.write_volatile(MaybeUninit::new(item));
+        }
+    }
+
+    /// Adds a new consumer that directly wait on producers
+    /// By default, consumers block producers writing new items when they have not yet be seen.
+    /// Setting a consumer as non-blocking enable producers to write event though the consumer may be lagging.
+    ///
+    /// # Safety
+    ///
+    /// Adding a consumer is only safe BEFORE the producers start queueing items.
+    pub fn add_consumer(self: &Arc<Self>, waiting_on: Arc<Barrier>, consumer_mode: Option<ConsumerMode>) -> Consumer<T> {
+        let consumer_mode = consumer_mode.unwrap_or_default();
+        let consumer_barrier = Arc::new(Barrier::default());
+        self.add_consumer_barrier(consumer_barrier.clone());
+        Consumer {
+            mode: consumer_mode,
+            next: 0,
+            waiting_on,
+            publish: consumer_barrier,
+            ring: self.clone(),
+            _shared: self.consumers_shared.clone(),
+        }
+    }
+
+    /// Gets the number of connected producers
+    #[must_use]
+    #[inline]
+    pub fn get_connected_producers(&self) -> usize {
+        Arc::strong_count(&self.producers_barrier) - 1
+    }
+
+    /// Gets the number of connected consumers
+    #[must_use]
+    #[inline]
+    pub fn get_connected_consumers(&self) -> usize {
+        Arc::strong_count(&self.consumers_shared) - 1
+    }
+
+    /// Gets the last item that was seen by all blocking consumers
+    ///
+    /// # Safety
+    ///
+    /// This is safe for as long as no other thread is adding a consumer at the same time.
+    #[must_use]
+    #[inline]
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn get_last_seen_by_all_blocking_consumers(&self, observer: usize) -> isize {
+        self.get_consumer_barriers()
+            .iter()
+            .map(|b| b.published())
+            .min()
+            .unwrap_or(observer as isize)
+    }
+}
+
 #[cfg(test)]
-mod tests_slots {
+mod tests_init {
+    use alloc::sync::Arc;
+
+    use super::{Barrier, RingBuffer};
+
+    #[test]
+    fn size_power_of_two() {
+        let _ring = RingBuffer::<usize>::new(Arc::new(Barrier::default()), 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "size must be power of two")]
+    fn panic_on_non_power_of_two() {
+        let _ring = RingBuffer::<usize>::new(Arc::new(Barrier::default()), 3);
+    }
+}
+
+#[cfg(test)]
+mod tests_drop {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::QueueSlots;
+    use super::{Barrier, RingBuffer};
 
     struct DropCallback(Box<dyn Fn()>);
 
@@ -290,415 +589,56 @@ mod tests_slots {
     }
 
     #[test]
-    fn test_slots_drop_empty() {
-        let _queue = QueueSlots::<DropCallback>::new(4);
+    fn on_empty() {
+        let _ring = RingBuffer::<DropCallback>::new(Arc::new(Barrier::default()), 16);
     }
 
-    fn test_slots_drop_full_with(count: usize, lap_count: usize) {
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let mut queue = QueueSlots::<DropCallback>::new(count);
-        for (index, slot) in queue.buffer.iter_mut().enumerate() {
-            let content = DropCallback(Box::new({
-                let drop_count = drop_count.clone();
-                move || {
-                    drop_count.fetch_add(1, Ordering::SeqCst);
-                }
-            }));
-            slot.content.get_mut().write(content);
-            *slot.state.get_mut() = lap_count * count + index + 1;
+    fn test_with_count(queue_size: usize, to_fill: usize, published: Option<usize>) {
+        assert!(to_fill <= queue_size);
+        if let Some(published) = published {
+            assert!(published + 1 >= to_fill); // the cursor must be at least the number of filled slots
+            if published >= queue_size {
+                assert!(to_fill == queue_size);
+            }
+        } else {
+            assert_eq!(to_fill, 0);
         }
-        drop(queue);
-        assert_eq!(count, drop_count.load(Ordering::SeqCst));
-    }
 
-    #[test]
-    fn test_slots_drop_full() {
-        test_slots_drop_full_with(4, 0);
-        test_slots_drop_full_with(4, 1);
-        test_slots_drop_full_with(4, 2);
-    }
-
-    #[test]
-    #[allow(clippy::identity_op)]
-    fn test_slots_drop_full_mid_lap() {
+        // create and fill the ring
+        let mut ring = RingBuffer::<DropCallback>::new(Arc::new(Barrier::default()), queue_size);
         let drop_count = Arc::new(AtomicUsize::new(0));
-        let mut queue = QueueSlots::<DropCallback>::new(4);
-
-        for slot in &mut queue.buffer {
-            slot.content.get_mut().write(DropCallback(Box::new({
+        for i in 0..to_fill {
+            ring.buffer[i].get_mut().write(DropCallback(Box::new({
                 let drop_count = drop_count.clone();
                 move || {
                     drop_count.fetch_add(1, Ordering::SeqCst);
                 }
             })));
         }
+        if let Some(published) = published {
+            ring.producers_barrier.write(published);
+        }
 
-        *queue.buffer[0].state.get_mut() = /*lap*/ 2 * /*count*/ 4 + /*index*/ 0 + 1;
-        *queue.buffer[1].state.get_mut() = /*lap*/ 2 * /*count*/ 4 + /*index*/ 1 + 1;
-        *queue.buffer[2].state.get_mut() = /*lap*/ 1 * /*count*/ 4 + /*index*/ 2 + 1;
-        *queue.buffer[3].state.get_mut() = /*lap*/ 1 * /*count*/ 4 + /*index*/ 3 + 1;
-
-        drop(queue);
-        assert_eq!(4, drop_count.load(Ordering::SeqCst));
+        // drop the ring
+        drop(ring);
+        assert_eq!(drop_count.load(Ordering::SeqCst), to_fill);
     }
 
     #[test]
-    #[allow(clippy::identity_op)]
-    fn test_slots_drop_half_full_middle() {
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let mut queue = QueueSlots::<DropCallback>::new(4);
-
-        queue.buffer[1].content.get_mut().write(DropCallback(Box::new({
-            let drop_count = drop_count.clone();
-            move || {
-                drop_count.fetch_add(1, Ordering::SeqCst);
-            }
-        })));
-        queue.buffer[2].content.get_mut().write(DropCallback(Box::new({
-            let drop_count = drop_count.clone();
-            move || {
-                drop_count.fetch_add(1, Ordering::SeqCst);
-            }
-        })));
-
-        *queue.buffer[0].state.get_mut() = /*lap*/ 2 * /*count*/ 4 + /*index*/ 0 + 0;
-        *queue.buffer[1].state.get_mut() = /*lap*/ 2 * /*count*/ 4 + /*index*/ 1 + 1;
-        *queue.buffer[2].state.get_mut() = /*lap*/ 2 * /*count*/ 4 + /*index*/ 2 + 1;
-        *queue.buffer[3].state.get_mut() = /*lap*/ 1 * /*count*/ 4 + /*index*/ 3 + 0;
-
-        drop(queue);
-        assert_eq!(2, drop_count.load(Ordering::SeqCst));
+    fn on_first_lap() {
+        test_with_count(4, 0, None);
+        test_with_count(4, 1, Some(0));
+        test_with_count(4, 2, Some(1));
+        test_with_count(4, 3, Some(2));
+        test_with_count(4, 4, Some(3));
     }
 
     #[test]
-    #[allow(clippy::identity_op)]
-    fn test_slots_drop_half_full_split() {
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let mut queue = QueueSlots::<DropCallback>::new(4);
-
-        queue.buffer[0].content.get_mut().write(DropCallback(Box::new({
-            let drop_count = drop_count.clone();
-            move || {
-                drop_count.fetch_add(1, Ordering::SeqCst);
-            }
-        })));
-        queue.buffer[3].content.get_mut().write(DropCallback(Box::new({
-            let drop_count = drop_count.clone();
-            move || {
-                drop_count.fetch_add(1, Ordering::SeqCst);
-            }
-        })));
-
-        *queue.buffer[0].state.get_mut() = /*lap*/ 3 * /*count*/ 4 + /*index*/ 0 + 1;
-        *queue.buffer[1].state.get_mut() = /*lap*/ 2 * /*count*/ 4 + /*index*/ 1 + 0;
-        *queue.buffer[2].state.get_mut() = /*lap*/ 2 * /*count*/ 4 + /*index*/ 2 + 0;
-        *queue.buffer[3].state.get_mut() = /*lap*/ 2 * /*count*/ 4 + /*index*/ 3 + 1;
-
-        drop(queue);
-        assert_eq!(2, drop_count.load(Ordering::SeqCst));
-    }
-}
-
-/// A cursor to access a queue
-pub struct QueueCursor<T> {
-    /// The backing circular queue
-    pub slots: Arc<QueueSlots<T>>,
-    /// The current index within the queue
-    pub index: usize,
-}
-
-impl<T> Debug for QueueCursor<T> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_map().key(&"index").value(&self.index).finish()
-    }
-}
-
-impl<T> QueueCursor<T> {
-    /// Gets whether this is the only cursor for the associated queue
-    #[must_use]
-    pub fn is_unique(&self) -> bool {
-        Arc::strong_count(&self.slots) == 1
-    }
-}
-
-/// Hub to access multiple queues, either for aggregating multiple sender, or for dispatching to multiple receivers
-#[derive(Debug)]
-pub struct QueuesHub<T> {
-    /// The size of the queues
-    pub queue_size: usize,
-    /// The aggregated cursors
-    pub cursors: Vec<QueueCursor<T>>,
-    /// Index of the next cursor to use
-    pub next: usize,
-}
-
-impl<T> QueuesHub<T> {
-    /// Gets the number of cursors on the other side of this hub
-    pub fn connected_other_sides(&self) -> usize {
-        self.cursors.iter().map(|cursor| Arc::strong_count(&cursor.slots) - 1).sum()
-    }
-
-    /// Gets the capacity of the queues
-    pub fn capacity(&self) -> usize {
-        self.queue_size
-    }
-
-    /// Gets the nunmber of messages actually in the queue assuming this hub is used to push items
-    pub fn count_assuming_push_use(&self) -> usize {
-        self.cursors
-            .iter()
-            .map(|cursor| cursor.slots.count_with_push_cursor(cursor.index))
-            .sum()
-    }
-
-    /// Gets the nunmber of messages actually in the queue assuming this hub is used to pop items
-    pub fn count_assuming_pop_use(&self) -> usize {
-        self.cursors
-            .iter()
-            .map(|cursor| cursor.slots.count_with_pop_cursor(cursor.index))
-            .sum()
-    }
-
-    /// Determines whether the queue is empty assuming this hub is used to push items
-    pub fn is_empty_assuming_push_use(&self) -> bool {
-        self.cursors
-            .iter()
-            .all(|cursor| cursor.slots.is_empty_with_push_cursor(cursor.index))
-    }
-
-    /// Determines whether the queue is empty assuming this hub is used to pop items
-    pub fn is_empty_assuming_pop_use(&self) -> bool {
-        self.cursors
-            .iter()
-            .all(|cursor| cursor.slots.is_empty_with_pop_cursor(cursor.index))
-    }
-
-    /// Determines whether the queue is full assuming this hub is used to push items
-    pub fn is_full_assuming_push_use(&self) -> bool {
-        self.cursors
-            .iter()
-            .all(|cursor| cursor.slots.is_full_with_push_cursor(cursor.index))
-    }
-
-    /// Determines whether the queue is full assuming this hub is used to pop items
-    pub fn is_full_assuming_pop_use(&self) -> bool {
-        self.cursors
-            .iter()
-            .all(|cursor| cursor.slots.is_full_with_pop_cursor(cursor.index))
-    }
-
-    /// Attempts to push an item in the case of a single sender, multiple receivers
-    pub fn try_push(&mut self, mut item: T) -> Result<(), TrySendError<T>> {
-        let mut count = 0;
-        while count < self.cursors.len() {
-            debug_assert!(self.next < self.cursors.len());
-            let cursor = unsafe { self.cursors.get_unchecked_mut(self.next) };
-            match cursor.slots.try_push(&mut cursor.index, item) {
-                Ok(()) => {
-                    return Ok(());
-                }
-                Err(error) => {
-                    count += 1;
-                    let to_remove = error.is_disconnected();
-                    item = error.into_inner();
-                    if to_remove {
-                        self.cursors.swap_remove(self.next);
-                    } else {
-                        self.next += 1;
-                    }
-                    if self.next >= self.cursors.len() {
-                        self.next = 0;
-                    }
-                }
-            }
-        }
-        if self.cursors.is_empty() {
-            Err(TrySendError::Disconnected(item))
-        } else {
-            Err(TrySendError::Full(item))
-        }
-    }
-
-    /// Tries to push for a specific queue
-    fn try_push_single_queue(&mut self, index: usize, item: T) -> Result<(), TrySendError<T>> {
-        let cursor = unsafe { self.cursors.get_unchecked_mut(index) };
-        match cursor.slots.try_push(&mut cursor.index, item) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                if error.is_disconnected() {
-                    // remove from the cursor
-                    self.cursors.remove(index);
-                }
-                Err(error)
-            }
-        }
-    }
-
-    /// Blocks while pushing an item
-    pub fn push(&mut self, mut item: T) -> Result<(), SendError<T>> {
-        let backoff = Backoff::new();
-        loop {
-            match self.try_push(item) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Disconnected(item)) => return Err(SendError(item)),
-                Err(TrySendError::Full(item_back)) => {
-                    item = item_back;
-                    // queue is full, we need to wait for another thread to make progress
-                    backoff.snooze();
-                }
-            }
-        }
-    }
-
-    /// Attempts to pop an item in the case of a single receiver, mutiple senders
-    pub fn try_pop(&mut self) -> Result<T, TryRecvError> {
-        let mut count = 0;
-        while count < self.cursors.len() {
-            debug_assert!(self.next < self.cursors.len());
-            let cursor = unsafe { self.cursors.get_unchecked_mut(self.next) };
-            let result = cursor.slots.try_pop(&mut cursor.index);
-            match result {
-                Ok(item) => {
-                    return Ok(item);
-                }
-                Err(error) => {
-                    count += 1;
-                    if error == TryRecvError::Disconnected {
-                        self.cursors.swap_remove(self.next);
-                    } else {
-                        self.next += 1;
-                    }
-                    if self.next >= self.cursors.len() {
-                        self.next = 0;
-                    }
-                }
-            }
-        }
-        if self.cursors.is_empty() {
-            Err(TryRecvError::Disconnected)
-        } else {
-            Err(TryRecvError::Empty)
-        }
-    }
-
-    /// Blocks while getting the next item
-    pub fn pop(&mut self) -> Result<T, RecvError> {
-        let backoff = Backoff::new();
-        loop {
-            match self.try_pop() {
-                Ok(item) => return Ok(item),
-                Err(TryRecvError::Disconnected) => return Err(RecvError),
-                Err(TryRecvError::Empty) => {
-                    // queue is empty, we need to wait for another thread to make progress
-                    backoff.snooze();
-                }
-            }
-        }
-    }
-
-    /// Attempts to pop multiple items from all the connected senders
-    pub fn try_pop_multiple(&mut self, buffer: &mut Vec<T>) -> Result<usize, TryRecvError> {
-        let mut count = 0;
-        let mut popped = 0;
-        while count < self.cursors.len() {
-            debug_assert!(self.next < self.cursors.len());
-            let cursor = unsafe { self.cursors.get_unchecked_mut(self.next) };
-            let result = cursor.slots.try_pop(&mut cursor.index);
-            match result {
-                Ok(item) => {
-                    buffer.push(item);
-                    popped += 1;
-                }
-                Err(error) => {
-                    count += 1;
-                    if error == TryRecvError::Disconnected {
-                        self.cursors.swap_remove(self.next);
-                    } else {
-                        self.next += 1;
-                    }
-                    if self.next >= self.cursors.len() {
-                        self.next = 0;
-                    }
-                }
-            }
-        }
-        if popped > 0 {
-            Ok(popped)
-        } else if self.cursors.is_empty() {
-            Err(TryRecvError::Disconnected)
-        } else {
-            Err(TryRecvError::Empty)
-        }
-    }
-
-    /// Attempts to get the unreceived items assuming this is a hub to push items
-    pub fn get_unreceivables(&mut self, buffer: &mut Vec<T>) -> Result<usize, ()> {
-        let cursors_count = self.cursors.len();
-        if cursors_count == 0 {
-            return Ok(0);
-        }
-
-        let mut total = 0;
-        self.cursors = self
-            .cursors
-            .drain(..)
-            .filter_map(|mut cursor| {
-                match cursor.slots.drain_with_push_cursor(cursor.index, buffer) {
-                    Ok(count) => {
-                        // this one was disconnected
-                        total += count;
-                        None
-                    }
-                    Err(slots) => {
-                        // still connected on the other side
-                        cursor.slots = slots;
-                        Some(cursor)
-                    }
-                }
-            })
-            .collect();
-
-        if cursors_count == self.cursors.len() {
-            // did not remove a single cursor => no disconnected
-            Err(())
-        } else {
-            Ok(total)
-        }
-    }
-}
-
-impl<T: Clone> QueuesHub<T> {
-    /// Pushes the same item onto all associated queues
-    pub fn push_to_all(&mut self, item: T) -> Result<usize, SendError<T>> {
-        let mut success = self.cursors.iter().map(|_| false).collect::<Vec<_>>();
-        let mut sucess_total = 0;
-        while sucess_total != self.cursors.len() {
-            let mut index = 0;
-            while index < self.cursors.len() {
-                if success[index] {
-                    index += 1;
-                    continue;
-                }
-                match self.try_push_single_queue(index, item.clone()) {
-                    Ok(()) => {
-                        success[index] = true;
-                        sucess_total += 1;
-                        index += 1;
-                    }
-                    Err(error) => {
-                        if error.is_disconnected() {
-                            success.remove(index);
-                        } else {
-                            index += 1;
-                        }
-                    }
-                }
-            }
-        }
-        if sucess_total == 0 {
-            Err(SendError(item))
-        } else {
-            Ok(sucess_total)
-        }
+    fn on_second_lap() {
+        test_with_count(4, 4, Some(4));
+        test_with_count(4, 4, Some(5));
+        test_with_count(4, 4, Some(6));
+        test_with_count(4, 4, Some(7));
+        test_with_count(4, 4, Some(8));
     }
 }

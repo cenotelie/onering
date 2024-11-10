@@ -11,6 +11,8 @@ use core::fmt::{Debug, Display};
 pub enum TrySendError<T> {
     /// The message could not be sent because the channel is full.
     Full(T),
+    /// There wasn't any data in to be pushed
+    NoData,
     /// The message could not be sent because the channel is disconnected.
     Disconnected(T),
 }
@@ -19,6 +21,7 @@ impl<T> Display for TrySendError<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Full(_) => write!(f, "failed to send: the channel is full"),
+            Self::NoData => write!(f, "failed to send: no data to send"),
             Self::Disconnected(_) => write!(f, "failed to send: the channel is disconnected"),
         }
     }
@@ -29,9 +32,10 @@ impl<T: Debug> core::error::Error for TrySendError<T> {}
 impl<T> TrySendError<T> {
     /// Gets back the wrapped message
     #[must_use]
-    pub fn into_inner(self) -> T {
+    pub fn into_inner(self) -> Option<T> {
         match self {
-            Self::Full(item) | Self::Disconnected(item) => item,
+            Self::Full(item) | Self::Disconnected(item) => Some(item),
+            Self::NoData => None,
         }
     }
 
@@ -52,12 +56,12 @@ impl<T> TrySendError<T> {
 ///
 /// The error contains the message so it can be recovered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SendError<T>(pub T);
+pub struct SendError<T>(pub Option<T>);
 
 impl<T> SendError<T> {
     /// Gets back the wrapped message
     #[must_use]
-    pub fn into_inner(self) -> T {
+    pub fn into_inner(self) -> Option<T> {
         self.0
     }
 }
@@ -73,6 +77,8 @@ impl<T> From<TrySendError<T>> for SendError<T> {
 pub enum TryRecvError {
     /// A message could not be received because the channel is empty
     Empty,
+    /// The receiver lags behind
+    Lagging(usize),
     /// The message could not be received because the channel is empty and disconnected
     Disconnected,
 }
@@ -81,6 +87,7 @@ impl Display for TryRecvError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Empty => write!(f, "failed to receive: the channel is empty"),
+            Self::Lagging(count) => write!(f, "failed to receive: lagging behind {count} messages"),
             Self::Disconnected => write!(f, "failed to receive: the channel is disconnected"),
         }
     }
@@ -104,18 +111,20 @@ impl TryRecvError {
 
 /// A message could not be received because the channel is empty and disconnected
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecvError;
+pub enum RecvError {
+    /// The receiver lags behind
+    Lagging(usize),
+    /// The message could not be received because the channel is empty and disconnected
+    Disconnected,
+}
 
 impl Display for RecvError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "failed to receive: the channel is empty and disconnected")
+        match self {
+            Self::Lagging(count) => write!(f, "failed to receive: lagging behind {count} messages"),
+            Self::Disconnected => write!(f, "failed to receive: the channel is disconnected"),
+        }
     }
 }
 
 impl core::error::Error for RecvError {}
-
-impl From<TryRecvError> for RecvError {
-    fn from(_value: TryRecvError) -> Self {
-        Self
-    }
-}

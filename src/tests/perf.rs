@@ -34,7 +34,7 @@ fn channel_1p_1c() {
     let duration = end.duration_since(start).as_secs_f64();
     #[allow(clippy::cast_precision_loss)]
     let throughput = (SCALE_MSG_COUNT as f64) / duration;
-    println!("channel_1p_1c queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, throughput={throughput}");
+    println!("channel_1p_1c queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, throughput={:.03}M", throughput / 1_000_000.0);
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn channel_mp_sc() {
     let duration = end.duration_since(start).as_secs_f64();
     #[allow(clippy::cast_precision_loss)]
     let throughput = (SCALE_MSG_COUNT as f64) / duration;
-    println!("channel_mp_sc queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, producers={SCALE_PRODUCERS}, consumers=1, throughput={throughput}");
+    println!("channel_mp_sc queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, producers={SCALE_PRODUCERS}, consumers=1, throughput={:.03}M", throughput / 1_000_000.0);
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn channel_sp_mc() {
     let duration = end.unwrap().duration_since(start).as_secs_f64();
     #[allow(clippy::cast_precision_loss)]
     let throughput = (SCALE_MSG_COUNT as f64) / duration;
-    println!("channel_sp_mc queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, producers=1, consumers={SCALE_CONSUMERS}, throughput={throughput}");
+    println!("channel_sp_mc queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, producers=1, consumers={SCALE_CONSUMERS}, throughput={:.03}M", throughput / 1_000_000.0);
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn test_channel_pipeline_3c() {
     let duration = end.duration_since(start).as_secs_f64();
     #[allow(clippy::cast_precision_loss)]
     let throughput = (SCALE_MSG_COUNT as f64) / duration;
-    println!("test_channel_pipeline_3c queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, throughput={throughput}");
+    println!("test_channel_pipeline_3c queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, throughput={:.03}M", throughput / 1_000_000.0);
 }
 
 #[test]
@@ -256,5 +256,5 @@ fn test_channel_diamond() {
     let duration = end.duration_since(start).as_secs_f64();
     #[allow(clippy::cast_precision_loss)]
     let throughput = (SCALE_MSG_COUNT as f64) / duration;
-    println!("test_channel_diamond queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, throughput={throughput}");
+    println!("test_channel_diamond queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, throughput={:.03}M", throughput / 1_000_000.0);
 }

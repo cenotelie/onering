@@ -5,6 +5,7 @@
 use crate::tests::{SCALE_CONSUMERS, SCALE_MSG_COUNT, SCALE_PRODUCERS, SCALE_QUEUE_SIZE};
 
 #[test]
+#[allow(clippy::cast_precision_loss)]
 fn channel_1p_1c() {
     let (sender, receiver) = crossbeam::channel::bounded(SCALE_QUEUE_SIZE);
 
@@ -34,12 +35,15 @@ fn channel_1p_1c() {
     let start = producer.join().unwrap();
     let end = consumer.join().unwrap();
     let duration = end.duration_since(start).as_secs_f64();
-    #[allow(clippy::cast_precision_loss)]
     let throughput = (SCALE_MSG_COUNT as f64) / duration;
-    println!("channel_1p_1c queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, throughput={throughput}");
+    println!(
+        "channel_1p_1c queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, throughput={:.03}M",
+        throughput / 1_000_000.0
+    );
 }
 
 #[test]
+#[allow(clippy::cast_precision_loss)]
 fn channel_mp_sc() {
     let (sender, receiver) = crossbeam::channel::bounded(SCALE_QUEUE_SIZE);
 
@@ -83,12 +87,12 @@ fn channel_mp_sc() {
     }
 
     let duration = end.duration_since(start).as_secs_f64();
-    #[allow(clippy::cast_precision_loss)]
-    let throughput = ((SCALE_MSG_COUNT * SCALE_PRODUCERS) as f64) / duration;
-    println!("channel_mp_sc queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, producers={SCALE_PRODUCERS}, consumers=1, throughput={throughput}");
+    let throughput = (SCALE_MSG_COUNT as f64) / duration;
+    println!("channel_mp_sc queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, producers={SCALE_PRODUCERS}, consumers=1, throughput={:.03}M", throughput / 1_000_000.0);
 }
 
 #[test]
+#[allow(clippy::cast_precision_loss)]
 fn channel_sp_mc() {
     let (sender, receiver) = crossbeam::channel::bounded(SCALE_QUEUE_SIZE);
 
@@ -140,7 +144,6 @@ fn channel_sp_mc() {
     }
 
     let duration = end.unwrap().duration_since(start).as_secs_f64();
-    #[allow(clippy::cast_precision_loss)]
     let throughput = (SCALE_MSG_COUNT as f64) / duration;
-    println!("channel_sp_mc queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, producers=1, consumers={SCALE_CONSUMERS}, throughput={throughput}");
+    println!("channel_sp_mc queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, producers=1, consumers={SCALE_CONSUMERS}, throughput={:.03}M", throughput / 1_000_000.0);
 }
