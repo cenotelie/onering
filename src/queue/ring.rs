@@ -8,6 +8,11 @@ use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::ops::Range;
+use core::sync::atomic::AtomicUsize;
+#[cfg(debug_assertions)]
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crossbeam_utils::CachePadded;
 
 use super::barriers::{Barrier, MultiBarrier, SingleBarrier, UserOutput};
 use super::Sequence;
@@ -20,13 +25,16 @@ pub struct RingBuffer<T> {
     /// The mask to use for getting an index with the buffer
     pub(crate) mask: usize,
     /// The value shared by all producers, used to keep track of connected producers
-    pub(crate) producers_shared: Arc<usize>,
+    pub(crate) producers_shared: Arc<CachePadded<AtomicUsize>>,
     /// The value shared by all consumers, used to keep track of connected consumers
     pub(crate) consumers_shared: Arc<usize>,
     /// The barrier enabling awaiting on the producer(s)
     pub(crate) producers_barrier: Arc<SingleBarrier>,
     /// The barriers associated to consumers so that the queue can know when an item has been used by all consumers
-    pub consumers_barrier: MultiBarrier,
+    consumers_barrier: UnsafeCell<MultiBarrier>,
+    /// The tripwire to make `consumers_barrier` mutable only on the setup phase
+    #[cfg(debug_assertions)]
+    consumers_barrier_is_mutable: AtomicBool,
 }
 
 /// SAFETY: The implementation guards the access to elements, this is fine for as long as `T` is itself `Sync`
@@ -60,10 +68,12 @@ impl<T> RingBuffer<T> {
         Self {
             buffer,
             mask: queue_size - 1,
-            producers_shared: Arc::new(0),
+            producers_shared: Arc::new(CachePadded::new(AtomicUsize::new(0))),
             consumers_shared: Arc::new(0),
             producers_barrier: Arc::new(SingleBarrier::new()),
-            consumers_barrier: MultiBarrier::default(),
+            consumers_barrier: UnsafeCell::new(MultiBarrier::default()),
+            #[cfg(debug_assertions)]
+            consumers_barrier_is_mutable: AtomicBool::new(true),
         }
     }
 
@@ -88,6 +98,7 @@ impl<T> RingBuffer<T> {
     /// Overwrites an item to a slot
     #[inline]
     pub(crate) fn write_slot(&self, index: usize, item: T) {
+        debug_assert!(index & self.mask < self.buffer.len());
         let slot = unsafe { self.buffer.get_unchecked(index & self.mask).get() };
         if core::mem::needs_drop::<T>() && index >= self.buffer.len() {
             // drop the previous value
@@ -102,7 +113,11 @@ impl<T> RingBuffer<T> {
 
     /// Register the output of a new consumer so that it can be correctly awaited on by the producers
     pub(crate) fn register_consumer_output(&self, output: &Arc<UserOutput>) {
-        self.consumers_barrier.add_dependency(output);
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(self.consumers_barrier_is_mutable.load(Ordering::Acquire));
+        }
+        unsafe { &mut *self.consumers_barrier.get() }.add_dependency(output);
     }
 
     /// Gets the number of connected producers
@@ -128,7 +143,11 @@ impl<T> RingBuffer<T> {
     #[inline]
     #[allow(clippy::cast_possible_wrap)]
     pub fn get_next_after_all_consumers(&self, observer: Sequence) -> Sequence {
-        self.consumers_barrier.next(observer)
+        #[cfg(debug_assertions)]
+        {
+            self.consumers_barrier_is_mutable.store(false, Ordering::Release);
+        }
+        unsafe { &*self.consumers_barrier.get() }.next(observer)
     }
 }
 

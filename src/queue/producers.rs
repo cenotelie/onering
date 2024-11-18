@@ -18,7 +18,7 @@ use crate::errors::TrySendError;
 #[derive(Debug)]
 pub struct SingleProducer<T> {
     /// The value shared by all producers, used to keep track of connected producers
-    _shared: Arc<usize>,
+    _shared_next: Arc<CachePadded<AtomicUsize>>,
     /// The identifier of the next message to be inserted in the queue
     next: usize,
     /// The owned output used to signal when an item is published
@@ -46,7 +46,7 @@ impl<T> SingleProducer<T> {
     #[must_use]
     pub fn new(ring: Arc<RingBuffer<T>>) -> Self {
         Self {
-            _shared: ring.producers_shared.clone(),
+            _shared_next: ring.producers_shared.clone(),
             next: 0,
             publish: ring.producers_barrier.get_dependency().clone(),
             ring,
@@ -268,12 +268,10 @@ mod tests_single {
 }
 
 /// A producer for a queue that can be concurrent with other (concurrent) producers
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ConcurrentProducer<T> {
-    /// The value shared by all producers, used to keep track of connected producers
-    _shared: Arc<usize>,
     /// The identifier of the next message to be inserted in the queue
-    next: Arc<CachePadded<AtomicUsize>>,
+    shared_next: Arc<CachePadded<AtomicUsize>>,
     /// The owned output used to signal when an item is published
     publish: Arc<UserOutput>,
     /// The ring itself
@@ -299,8 +297,7 @@ impl<T> ConcurrentProducer<T> {
     #[must_use]
     pub fn new(ring: Arc<RingBuffer<T>>) -> Self {
         Self {
-            _shared: ring.producers_shared.clone(),
-            next: Arc::new(CachePadded::new(AtomicUsize::new(0))),
+            shared_next: ring.producers_shared.clone(),
             publish: ring.producers_barrier.get_dependency().clone(),
             ring,
         }
@@ -310,12 +307,19 @@ impl<T> ConcurrentProducer<T> {
     #[must_use]
     #[inline]
     pub fn get_number_of_items(&self) -> usize {
-        let next = self.next.load(Ordering::Acquire);
+        let mut next = self.shared_next.load(Ordering::Acquire);
         let last_seq = self.ring.get_next_after_all_consumers(Sequence::from(next));
-        if last_seq.is_valid_item() {
-            next - last_seq.as_index() - 1
-        } else {
-            next
+        loop {
+            if last_seq.is_valid_item() {
+                let last_seq_index = last_seq.as_index();
+                if last_seq_index < next {
+                    return next - last_seq_index - 1;
+                }
+                // this producer is waaaay late, reload
+                next = self.shared_next.load(Ordering::Acquire);
+            } else {
+                return next;
+            }
         }
     }
 
@@ -326,12 +330,18 @@ impl<T> ConcurrentProducer<T> {
     /// This returns a `TrySendError` when the queue is full or there no longer are any consumer
     pub fn try_push(&mut self, item: T) -> Result<(), TrySendError<T>> {
         let backoff = Backoff::new();
-        let mut next = self.next.load(Ordering::Acquire);
+        let mut next = self.shared_next.load(Ordering::Acquire);
         let last_seq = self.ring.get_next_after_all_consumers(Sequence::from(next));
 
         loop {
             let current_count = if last_seq.is_valid_item() {
-                next - last_seq.as_index() - 1
+                let last_seq_index = last_seq.as_index();
+                if last_seq_index >= next {
+                    // this producer is waaaay late
+                    next = self.shared_next.load(Ordering::Acquire);
+                    continue;
+                }
+                next - last_seq_index - 1
             } else {
                 next
             };
@@ -345,7 +355,7 @@ impl<T> ConcurrentProducer<T> {
 
             // try to acquire
             if let Err(real_next) = self
-                .next
+                .shared_next
                 .compare_exchange_weak(next, next + 1, Ordering::AcqRel, Ordering::Relaxed)
             {
                 next = real_next;
@@ -390,13 +400,13 @@ mod tests_concurrent {
         let producer = ConcurrentProducer::new(ring);
 
         assert_eq!(producer.get_number_of_items(), 0);
-        producer.next.store(1, Ordering::Relaxed);
+        producer.shared_next.store(1, Ordering::Relaxed);
         assert_eq!(producer.get_number_of_items(), 1);
-        producer.next.store(2, Ordering::Relaxed);
+        producer.shared_next.store(2, Ordering::Relaxed);
         assert_eq!(producer.get_number_of_items(), 2);
-        producer.next.store(3, Ordering::Relaxed);
+        producer.shared_next.store(3, Ordering::Relaxed);
         assert_eq!(producer.get_number_of_items(), 3);
-        producer.next.store(4, Ordering::Relaxed);
+        producer.shared_next.store(4, Ordering::Relaxed);
         assert_eq!(producer.get_number_of_items(), 4);
     }
 
@@ -409,15 +419,15 @@ mod tests_concurrent {
         let producer = ConcurrentProducer::new(ring);
 
         assert_eq!(producer.get_number_of_items(), 0);
-        producer.next.store(1, Ordering::Relaxed);
+        producer.shared_next.store(1, Ordering::Relaxed);
         assert_eq!(producer.get_number_of_items(), 1);
         consumer_output.commit(Sequence::from(0_isize));
         assert_eq!(producer.get_number_of_items(), 0);
-        producer.next.store(2, Ordering::Relaxed);
+        producer.shared_next.store(2, Ordering::Relaxed);
         assert_eq!(producer.get_number_of_items(), 1);
-        producer.next.store(3, Ordering::Relaxed);
+        producer.shared_next.store(3, Ordering::Relaxed);
         assert_eq!(producer.get_number_of_items(), 2);
-        producer.next.store(4, Ordering::Relaxed);
+        producer.shared_next.store(4, Ordering::Relaxed);
         assert_eq!(producer.get_number_of_items(), 3);
         consumer_output.commit(Sequence::from(1_isize));
         assert_eq!(producer.get_number_of_items(), 2);
@@ -463,7 +473,7 @@ mod tests_concurrent {
         let ring = Arc::new(ring);
         let mut producer = ConcurrentProducer::new(ring);
 
-        producer.next.store(4, Ordering::Relaxed);
+        producer.shared_next.store(4, Ordering::Relaxed);
         assert_eq!(producer.get_number_of_items(), 4);
         let r = producer.try_push(0);
         assert_eq!(r, Err(TrySendError::Full(0)));

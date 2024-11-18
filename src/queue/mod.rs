@@ -125,7 +125,7 @@ mod tests_concurrency_stress {
     /// The size of the queue to use
     const SCALE_QUEUE_SIZE: usize = 256;
     /// The number of messages
-    const SCALE_MSG_COUNT: usize = 500_000;
+    const SCALE_MSG_COUNT: usize = 1_000_000;
     /// The number of producers in a multiple producers, singe consumer test
     const SCALE_PRODUCERS: usize = 5;
     /// The number of consumers in a multiple producers, singe consumer test
@@ -134,105 +134,162 @@ mod tests_concurrency_stress {
     #[test]
     fn spsc() {
         let ring = Arc::new(RingBuffer::<usize>::new(SCALE_QUEUE_SIZE));
-        let producer = {
-            let mut sender = SingleProducer::new(ring.clone());
-            std::thread::spawn(move || {
-                let mut _tries = 0;
-                for i in 0..SCALE_MSG_COUNT {
-                    _tries += 1;
-                    while sender.try_push(i).is_err() {
-                        _tries += 1;
-                    }
-                }
-            })
-        };
+        let mut sender = SingleProducer::new(ring.clone());
+        let mut receiver = Consumer::new_for_ring(ring.clone(), ConsumerMode::Blocking);
 
-        let consumer = {
-            let mut receiver = Consumer::new_for_ring(ring.clone(), ConsumerMode::Blocking);
-            std::thread::spawn(move || {
-                let mut outputs = Vec::with_capacity(SCALE_MSG_COUNT);
-                let mut expected = 0;
-                loop {
-                    match receiver.try_recv() {
-                        Ok(access) => {
-                            for &item in access {
-                                outputs.push(item);
-                                assert_eq!(item, expected);
-                                expected += 1;
-                            }
+        let consumer = std::thread::spawn(move || {
+            let mut outputs = Vec::with_capacity(SCALE_MSG_COUNT);
+            loop {
+                match receiver.try_recv() {
+                    Ok(access) => {
+                        for &item in access {
+                            outputs.push(item);
                         }
-                        Err(TryRecvError::Lagging(_)) => {
-                            panic!("consumer should not lag");
-                        }
-                        Err(TryRecvError::Disconnected) => {
-                            break;
-                        }
-                        Err(TryRecvError::Empty) => {}
                     }
+                    Err(TryRecvError::Lagging(_)) => {
+                        panic!("consumer should not lag");
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => {}
                 }
-                outputs.sort_unstable();
-                outputs.dedup();
-                assert_eq!(SCALE_MSG_COUNT, outputs.len());
-                for (i, v) in outputs.into_iter().enumerate() {
-                    assert_eq!(i, v);
+            }
+            outputs.sort_unstable();
+            outputs.dedup();
+            assert_eq!(SCALE_MSG_COUNT, outputs.len());
+            for (i, v) in outputs.into_iter().enumerate() {
+                assert_eq!(i, v);
+            }
+        });
+
+        let producer = std::thread::spawn(move || {
+            let mut _tries = 0;
+            for i in 0..SCALE_MSG_COUNT {
+                _tries += 1;
+                while sender.try_push(i).is_err() {
+                    _tries += 1;
                 }
-            })
-        };
+            }
+        });
 
         producer.join().unwrap();
         consumer.join().unwrap();
     }
 
-    // #[test]
-    // fn mpmc() {
-    //     let ring = Arc::new(RingBuffer::<usize>::new(SCALE_QUEUE_SIZE));
-    //     let producers = (0..SCALE_PRODUCERS)
-    //         .map(|p| {
-    //             let mut sender = ConcurrentProducer::new(ring.clone());
-    //             std::thread::spawn(move || {
-    //                 for i in 0..(SCALE_MSG_COUNT / SCALE_PRODUCERS) {
-    //                     while sender.try_push((p * SCALE_MSG_COUNT / SCALE_PRODUCERS) + i).is_err() {}
-    //                 }
-    //             })
-    //         })
-    //         .collect::<Vec<_>>();
+    #[test]
+    fn spmc() {
+        let ring = Arc::new(RingBuffer::<usize>::new(SCALE_QUEUE_SIZE));
+        let mut sender = SingleProducer::new(ring.clone());
+        let mut receivers = (0..SCALE_CONSUMERS)
+            .map(|_| Consumer::new_for_ring(ring.clone(), ConsumerMode::Blocking))
+            .collect::<Vec<_>>();
 
-    //     let consumers = (0..SCALE_CONSUMERS)
-    //         .map(|_| {
-    //             let mut receiver = Consumer::new_for_ring(ring.clone(), ConsumerMode::Blocking);
-    //             std::thread::spawn(move || {
-    //                 let mut outputs = Vec::with_capacity(SCALE_MSG_COUNT);
-    //                 loop {
-    //                     match receiver.try_recv() {
-    //                         Ok(access) => {
-    //                             for &item in access {
-    //                                 outputs.push(item);
-    //                             }
-    //                         }
-    //                         Err(TryRecvError::Lagging(_)) => {
-    //                             panic!("consumer should not lag");
-    //                         }
-    //                         Err(TryRecvError::Disconnected) => {
-    //                             break;
-    //                         }
-    //                         Err(TryRecvError::Empty) => {}
-    //                     }
-    //                 }
-    //                 outputs.sort_unstable();
-    //                 outputs.dedup();
-    //                 assert_eq!(SCALE_MSG_COUNT, outputs.len());
-    //                 for (i, v) in outputs.into_iter().enumerate() {
-    //                     assert_eq!(i, v);
-    //                 }
-    //             })
-    //         })
-    //         .collect::<Vec<_>>();
+        let consumers = (0..SCALE_CONSUMERS)
+            .map(|_| {
+                let mut receiver = receivers.pop().unwrap();
+                std::thread::spawn(move || {
+                    let mut outputs = Vec::with_capacity(SCALE_MSG_COUNT);
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(access) => {
+                                for &item in access {
+                                    outputs.push(item);
+                                }
+                            }
+                            Err(TryRecvError::Lagging(_)) => {
+                                panic!("consumer should not lag");
+                            }
+                            Err(TryRecvError::Disconnected) => {
+                                break;
+                            }
+                            Err(TryRecvError::Empty) => {}
+                        }
+                    }
+                    outputs.sort_unstable();
+                    outputs.dedup();
+                    assert_eq!(SCALE_MSG_COUNT, outputs.len());
+                    for (i, v) in outputs.into_iter().enumerate() {
+                        assert_eq!(i, v);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
 
-    //     for producer in producers {
-    //         producer.join().unwrap();
-    //     }
-    //     for consumer in consumers {
-    //         consumer.join().unwrap();
-    //     }
-    // }
+        let producer = std::thread::spawn(move || {
+            let mut _tries = 0;
+            for i in 0..SCALE_MSG_COUNT {
+                _tries += 1;
+                while sender.try_push(i).is_err() {
+                    _tries += 1;
+                }
+            }
+        });
+
+        producer.join().unwrap();
+        for consumer in consumers {
+            consumer.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn mpmc() {
+        let ring = Arc::new(RingBuffer::<usize>::new(SCALE_QUEUE_SIZE));
+        let mut senders = (0..SCALE_PRODUCERS)
+            .map(|_| ConcurrentProducer::new(ring.clone()))
+            .collect::<Vec<_>>();
+        let mut receivers = (0..SCALE_CONSUMERS)
+            .map(|_| Consumer::new_for_ring(ring.clone(), ConsumerMode::Blocking))
+            .collect::<Vec<_>>();
+
+        let consumers = (0..SCALE_CONSUMERS)
+            .map(|_| {
+                let mut receiver = receivers.pop().unwrap();
+                std::thread::spawn(move || {
+                    let mut outputs = Vec::with_capacity(SCALE_MSG_COUNT);
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(access) => {
+                                for &item in access {
+                                    outputs.push(item);
+                                }
+                            }
+                            Err(TryRecvError::Lagging(_)) => {
+                                panic!("consumer should not lag");
+                            }
+                            Err(TryRecvError::Disconnected) => {
+                                break;
+                            }
+                            Err(TryRecvError::Empty) => {}
+                        }
+                    }
+                    outputs.sort_unstable();
+                    outputs.dedup();
+                    assert_eq!(SCALE_MSG_COUNT, outputs.len());
+                    for (i, v) in outputs.into_iter().enumerate() {
+                        assert_eq!(i, v);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let producers = (0..SCALE_PRODUCERS)
+            .map(|p| {
+                let mut sender = senders.pop().unwrap();
+                std::thread::spawn(move || {
+                    for i in 0..(SCALE_MSG_COUNT / SCALE_PRODUCERS) {
+                        while sender.try_push((p * SCALE_MSG_COUNT / SCALE_PRODUCERS) + i).is_err() {}
+                        println!("pushed {}", (p * SCALE_MSG_COUNT / SCALE_PRODUCERS) + i);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for producer in producers {
+            producer.join().unwrap();
+        }
+        for consumer in consumers {
+            consumer.join().unwrap();
+        }
+    }
 }

@@ -82,6 +82,8 @@ pub struct ConsumerAccess<'a, T> {
     last_id: Sequence,
     /// The reference to the item itself
     items: &'a [T],
+    /// The next value to yield for the iterator
+    next: usize,
 }
 
 impl<'a, T> Deref for ConsumerAccess<'a, T> {
@@ -98,40 +100,7 @@ impl<'a, T> Drop for ConsumerAccess<'a, T> {
     }
 }
 
-impl<'a, T> IntoIterator for ConsumerAccess<'a, T> {
-    type Item = &'a T;
-    type IntoIter = ConsumerAccessIter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        ConsumerAccessIter {
-            parent: self.parent,
-            last_id: self.last_id,
-            items: self.items,
-            next: 0,
-        }
-    }
-}
-
-/// An iterator over items from the queue obtained through a consumer
-#[derive(Debug)]
-pub struct ConsumerAccessIter<'a, T> {
-    /// The parent consumer
-    parent: &'a Consumer<T>,
-    /// The identifier if the last item in this batch
-    last_id: Sequence,
-    /// The reference to the item itself
-    items: &'a [T],
-    /// the next value to yield for the iterator
-    next: usize,
-}
-
-impl<'a, T> Drop for ConsumerAccessIter<'a, T> {
-    fn drop(&mut self) {
-        self.parent.publish.commit(self.last_id);
-    }
-}
-
-impl<'a, T> Iterator for ConsumerAccessIter<'a, T> {
+impl<'a, T> Iterator for ConsumerAccess<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -145,7 +114,7 @@ impl<'a, T> Iterator for ConsumerAccessIter<'a, T> {
     }
 }
 
-impl<'a, T> ExactSizeIterator for ConsumerAccessIter<'a, T> {
+impl<'a, T> ExactSizeIterator for ConsumerAccess<'a, T> {
     fn len(&self) -> usize {
         self.items.len()
     }
@@ -280,6 +249,7 @@ impl<T> Consumer<T> {
             parent: self,
             last_id: Sequence::from(last_id),
             items,
+            next: 0,
         })
     }
 
