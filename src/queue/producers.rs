@@ -268,7 +268,7 @@ mod tests_single {
 }
 
 /// A producer for a queue that can be concurrent with other (concurrent) producers
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConcurrentProducer<T> {
     /// The identifier of the next message to be inserted in the queue
     shared_next: Arc<CachePadded<AtomicUsize>>,
