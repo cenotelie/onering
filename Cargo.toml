@@ -14,8 +14,15 @@ default = ["std"]
 std = ["crossbeam-utils/std"]
 
 [dependencies]
-libc = "0.2"
-crossbeam-utils = { version = "0.8" }
+crossbeam-utils = "0.8"
 
 [dev-dependencies]
-crossbeam = {version = "0.8"}
+criterion = "0.5"
+crossbeam = "0.8"
+
+[[bench]]
+name = "crossbeam"
+harness = false
+[[bench]]
+name = "queue"
+harness = false

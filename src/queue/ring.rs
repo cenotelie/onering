@@ -60,7 +60,8 @@ impl<T> Drop for RingBuffer<T> {
 
 impl<T> RingBuffer<T> {
     /// Creates a new buffer
-    pub(crate) fn new(queue_size: usize) -> Self {
+    #[must_use]
+    pub fn new(queue_size: usize) -> Self {
         assert!(queue_size.is_power_of_two(), "size must be power of two");
         let buffer = (0..queue_size)
             .map(|_i| UnsafeCell::new(MaybeUninit::uninit()))

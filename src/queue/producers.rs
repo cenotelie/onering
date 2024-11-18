@@ -45,6 +45,11 @@ impl<T> SingleProducer<T> {
     /// Creates the producer for a ring
     #[must_use]
     pub fn new(ring: Arc<RingBuffer<T>>) -> Self {
+        assert_eq!(
+            Arc::strong_count(&ring.producers_shared),
+            1,
+            "another producer is attached to the ring"
+        );
         Self {
             _shared_next: ring.producers_shared.clone(),
             next: 0,

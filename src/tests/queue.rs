@@ -6,65 +6,64 @@ use alloc::sync::Arc;
 
 use crossbeam_utils::Backoff;
 
-use crate::queue::{Consumer, QueueUser, RingBuffer, SingleProducer};
+use crate::errors::TryRecvError;
+use crate::queue::{Consumer, ConsumerMode, RingBuffer, SingleProducer};
 use crate::tests::{SCALE_CONSUMERS, SCALE_MSG_COUNT, SCALE_PRODUCERS, SCALE_QUEUE_SIZE};
 
 #[test]
 #[allow(clippy::cast_precision_loss)]
-fn queue_1p_1c() {
+fn queue_spsc() {
     let ring = Arc::new(RingBuffer::<usize>::new(SCALE_QUEUE_SIZE));
     let mut sender = SingleProducer::new(ring.clone());
-    let mut receiver = Consumer::new_awaiting_on(&sender);
+    let mut receiver = Consumer::new_for_ring(ring.clone(), ConsumerMode::Blocking);
 
-    let producer = std::thread::spawn({
-        move || {
-            let mut tries = 0_usize;
-            let start = std::time::Instant::now();
-            for i in 0..SCALE_MSG_COUNT {
-                tries += 1;
-                while sender.try_push(i).is_err() {
-                    tries += 1;
-                }
-            }
-            let end = std::time::Instant::now();
-            let error_rate = ((tries - SCALE_MSG_COUNT) * 100) as f64 / tries as f64;
-            println!(
-                "producer: error rate={error_rate:.2}%  finished in {}ms",
-                (end - start).as_millis()
-            );
-            start
-        }
-    });
-    let consumer = std::thread::spawn({
-        move || {
-            let mut count = 0;
-            let mut batch_size = 0;
-            let mut batch_count = 0;
-            let mut buffer = vec![0; SCALE_QUEUE_SIZE];
-            while count < SCALE_MSG_COUNT {
-                let backoff = Backoff::new();
-                if let Ok(len) = receiver.try_recv_copies(&mut buffer) {
-                    for (index, value) in buffer[..len].iter().enumerate() {
-                        assert_eq!(count + index, *value);
+    let consumer = std::thread::spawn(move || {
+        let mut outputs = Vec::with_capacity(SCALE_MSG_COUNT);
+        loop {
+            match receiver.try_recv() {
+                Ok(access) => {
+                    for &item in access {
+                        outputs.push(item);
                     }
-                    count += len;
-                    batch_size += len;
-                    batch_count += 1;
-                    // wait a bit
+                }
+                Err(TryRecvError::Lagging(_)) => {
+                    panic!("consumer should not lag");
+                }
+                Err(TryRecvError::Disconnected) => {
+                    break;
+                }
+                Err(TryRecvError::Empty) => {
+                    let backoff = Backoff::new();
                     backoff.snooze();
-                } else {
-                    backoff.spin();
                 }
             }
-            (std::time::Instant::now(), batch_size as f64 / f64::from(batch_count))
         }
+        let end = std::time::Instant::now();
+        outputs.sort_unstable();
+        outputs.dedup();
+        assert_eq!(SCALE_MSG_COUNT, outputs.len());
+        for (i, v) in outputs.into_iter().enumerate() {
+            assert_eq!(i, v);
+        }
+        end
+    });
+
+    let producer = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        for i in 0..SCALE_MSG_COUNT {
+            while sender.try_push(i).is_err() {
+                let backoff = Backoff::new();
+                backoff.spin();
+            }
+        }
+        start
     });
 
     let start = producer.join().unwrap();
-    let (end, mean_batch_size) = consumer.join().unwrap();
+    let end = consumer.join().unwrap();
     let duration = end.duration_since(start).as_secs_f64();
     let throughput = (SCALE_MSG_COUNT as f64) / duration;
-    println!("queue_1p_1c queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, mean_batch_size={mean_batch_size:.02}, throughput={:.03}M", throughput / 1_000_000.0);
+    println!("queue_spsc queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, throughput={:.03}M", throughput / 1_000_000.0);
 }
 
 // #[test]

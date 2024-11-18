@@ -131,18 +131,18 @@ impl Barrier for MultiBarrier {
     #[inline]
     fn next(&self, _observer: Sequence) -> Sequence {
         self.dependencies.iter().map(|o| o.published()).min().unwrap_or_default()
-        // if dependencies.is_empty() {
+        // if self.dependencies.is_empty() {
         //     // short circuit to simplify return
         //     return Sequence::default();
         // }
         // let mut acc: Option<(usize, Sequence)> = None;
         // let mut index = 0;
-        // while index < dependencies.len() {
-        //     let published = unsafe { dependencies.get_unchecked(index) }.published();
+        // while index < self.dependencies.len() {
+        //     let published = unsafe { self.dependencies.get_unchecked(index) }.published();
         //     if !published.is_valid_item() || published <= observer {
         //         if index != 0 {
         //             // put on first because it is supposed to be the slowest
-        //             dependencies.swap(0, index);
+        //             self.dependencies.swap(0, index);
         //         }
         //         return published;
         //     }
@@ -161,7 +161,7 @@ impl Barrier for MultiBarrier {
         // let (index, min) = unsafe { acc.unwrap_unchecked() }; // safe because we checked dependencies is not empty
         // if index != 0 {
         //     // put on first because it is supposed to be the slowest
-        //     dependencies.swap(0, index);
+        //     self.dependencies.swap(0, index);
         // }
         // min
     }
