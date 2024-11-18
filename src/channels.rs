@@ -4,10 +4,12 @@
 
 //! Synchronous channels backed by a ring buffer
 
+use alloc::sync::Arc;
+
 use crossbeam_utils::Backoff;
 
 use crate::errors::{RecvError, SendError, TryRecvError, TrySendError};
-use crate::queue::{Consumer, ConsumerAccess, ConsumerMode, QueueUser, RingBuffer, SingleProducer};
+use crate::queue::{Consumer, ConsumerAccess, ConsumerMode, RingBuffer, SingleProducer};
 
 /// Common traits for all kind of sender
 pub trait Sender: Sized {
@@ -115,7 +117,7 @@ impl<T> Sender for SpSender<T> {
 
     #[inline]
     fn capacity(&self) -> usize {
-        self.producer.ring.mask + 1
+        self.producer.ring.capacity()
     }
 
     #[inline]
@@ -164,7 +166,7 @@ impl<T> Receiver for SpReceiver<T> {
 
     #[inline]
     fn capacity(&self) -> usize {
-        self.consumer.ring.mask + 1
+        self.consumer.ring.capacity()
     }
 
     #[inline]
@@ -214,20 +216,15 @@ impl<T> Receiver for SpReceiver<T> {
 /// All consumers receive all items, meaning this is a dispatch queue.
 #[must_use]
 pub fn channel_spmc<T>(queue_size: usize) -> SpSender<T> {
-    let producer = RingBuffer::<T>::new_single_producer(queue_size);
+    let producer = SingleProducer::new(Arc::new(RingBuffer::new(queue_size)));
     SpSender { producer }
 }
 
 impl<T> SpSender<T> {
     /// Adds a receiver to the channel
-    /// By default, consumers block producers writing new items when they have not yet be seen.
-    /// Setting a consumer as non-blocking enable producers to write event though the consumer may be lagging.
-    pub fn add_receiver(&mut self, consumer_mode: Option<ConsumerMode>) -> SpReceiver<T> {
+    pub fn add_receiver(&mut self) -> SpReceiver<T> {
         SpReceiver {
-            consumer: self
-                .producer
-                .ring
-                .add_consumer(self.producer.publication_barrier(), consumer_mode),
+            consumer: Consumer::new_awaiting_on(&self.producer, ConsumerMode::Blocking),
         }
     }
 }

@@ -11,7 +11,7 @@ use core::fmt::{Debug, Display};
 pub enum TrySendError<T> {
     /// The message could not be sent because the channel is full.
     Full(T),
-    /// There wasn't any data in to be pushed
+    /// There wasn't any data to be pushed
     NoData,
     /// The message could not be sent because the channel is disconnected.
     Disconnected(T),

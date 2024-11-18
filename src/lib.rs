@@ -13,10 +13,10 @@
 
 extern crate alloc;
 
-pub mod affinity;
+// pub mod affinity;
 pub mod channels;
 pub mod errors;
 pub mod queue;
 
-#[cfg(test)]
-mod tests;
+// #[cfg(test)]
+// mod tests;

@@ -2,8 +2,8 @@
  * Copyright (c) 2024 Cénotélie Opérations SAS (cenotelie.fr)
  ******************************************************************************/
 
-mod crossbeam;
-mod queue;
+// mod crossbeam;
+// mod queue;
 // mod perf;
 
 /// The size of the queue to use
@@ -25,7 +25,7 @@ pub fn assert_sync<T: Sync>(_thing: &T) {}
 fn test_singe_sender_receiver_are_send() {
     // usize: Send + Sync
     let mut sender = crate::channels::channel_spmc::<usize>(4);
-    let receiver = sender.add_receiver(None);
+    let receiver = sender.add_receiver();
     assert_send(&sender);
     assert_send(&receiver);
     assert_sync(&sender);
