@@ -1,11 +1,11 @@
 [package]
-name = "disruptor"
-version = "1.0.0"
+name = "onering"
+version = "0.1.0"
 authors = ["Laurent Wouters <lwouters@cenotelie.fr>"]
 description = "High throughput synchronous channels"
-repository = "https://github.com/cenotelie/disruptor"
-homepage = "https://github.com/cenotelie/disruptor"
-documentation = "https://github.com/cenotelie/disruptor"
+repository = "https://github.com/cenotelie/onering"
+homepage = "https://github.com/cenotelie/onering"
+documentation = "https://github.com/cenotelie/onering"
 license = "MIT"
 edition = "2021"
 

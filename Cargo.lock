@@ -198,16 +198,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a81dae078cea95a014a339291cec439d2f232ebe854a9d672b796c6afafa9b7"
 
 [[package]]
-name = "disruptor"
-version = "1.0.0"
-dependencies = [
- "criterion",
- "crossbeam",
- "crossbeam-utils",
- "disruptor-rs",
-]
-
-[[package]]
 name = "disruptor-rs"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -306,6 +296,16 @@ name = "once_cell"
 version = "1.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1261fe7e33c73b354eab43b1273a57c8f967d0391e80353e51f764ac02cf6775"
+
+[[package]]
+name = "onering"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "crossbeam",
+ "crossbeam-utils",
+ "disruptor-rs",
+]
 
 [[package]]
 name = "oorandom"

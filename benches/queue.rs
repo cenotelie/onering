@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use crossbeam_utils::Backoff;
-use disruptor::errors::TryRecvError;
-use disruptor::queue::{Consumer, ConsumerMode, RingBuffer, SingleProducer};
+use onering::errors::TryRecvError;
+use onering::queue::{Consumer, ConsumerMode, RingBuffer, SingleProducer};
 
 /// The size of the queue to use
 pub const SCALE_QUEUE_SIZE: usize = 256;
