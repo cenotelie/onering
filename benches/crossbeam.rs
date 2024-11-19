@@ -34,10 +34,35 @@ fn crossbeam_spsc() {
     consumer.join().unwrap();
 }
 
+fn crossbeam_spmc() {
+    let (sender, receiver) = crossbeam::channel::bounded(SCALE_QUEUE_SIZE);
+
+    let consumers = (0..SCALE_CONSUMERS)
+        .map(|_| {
+            let receiver = receiver.clone();
+            std::thread::spawn({
+                move || {
+                    while let Ok(_item) = receiver.recv() {}
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for i in 0..SCALE_MSG_COUNT {
+        while sender.send(i).is_err() {}
+    }
+    drop(sender);
+
+    for consumer in consumers {
+        consumer.join().unwrap();
+    }
+}
+
 pub fn bench_crossbeam(c: &mut Criterion) {
     let mut group = c.benchmark_group("crossbeam");
     group.throughput(Throughput::Elements(SCALE_MSG_COUNT as u64));
     group.bench_function("crossbeam_spsc", |b| b.iter(crossbeam_spsc));
+    group.bench_function("crossbeam_spmc", |b| b.iter(crossbeam_spmc));
     group.finish();
 }
 

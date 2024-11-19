@@ -17,6 +17,3 @@ extern crate alloc;
 pub mod channels;
 pub mod errors;
 pub mod queue;
-
-// #[cfg(test)]
-// mod tests;

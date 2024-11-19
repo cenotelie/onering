@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use crossbeam_utils::Backoff;
+use disruptor::errors::TryRecvError;
 use disruptor::queue::{Consumer, ConsumerMode, RingBuffer, SingleProducer};
 
 /// The size of the queue to use
@@ -26,13 +27,19 @@ fn queue_spsc() {
                 match consumer.try_recv() {
                     Ok(items) => {
                         for &item in items {
-                            assert_eq!(next, item);
+                            assert_eq!(item, next);
                             next += 1;
                         }
-                    }
-                    Err(_e) => {
+                        // wait a little bit for the next batch
                         let backoff = Backoff::new();
                         backoff.snooze();
+                    }
+                    Err(e) => {
+                        if matches!(e, TryRecvError::Empty) {
+                            // wait a little bit
+                            let backoff = Backoff::new();
+                            backoff.snooze();
+                        }
                     }
                 }
             }
@@ -46,10 +53,50 @@ fn queue_spsc() {
     consumer.join().unwrap();
 }
 
-pub fn bench_crossbeam(c: &mut Criterion) {
+fn queue_spmc() {
+    let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(SCALE_QUEUE_SIZE));
+    let mut consumers = (0..SCALE_CONSUMERS)
+        .map(|_| Consumer::new(ring.clone(), ConsumerMode::Blocking))
+        .collect::<Vec<_>>();
+    let mut producer = SingleProducer::new(ring);
+
+    let consumer_threads = (0..SCALE_CONSUMERS)
+        .map(|_| {
+            let mut consumer = consumers.pop().unwrap();
+            std::thread::spawn({
+                move || {
+                    let mut count = 0;
+                    while count < SCALE_MSG_COUNT {
+                        let waiting = consumer.get_number_of_items();
+                        if waiting < 20 && count + waiting < SCALE_MSG_COUNT {
+                            let backoff = Backoff::new();
+                            backoff.spin();
+                            continue;
+                        }
+                        if let Ok(items) = consumer.try_recv() {
+                            count += items.len();
+                        }
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for item in 0..SCALE_MSG_COUNT {
+        while producer.try_push(item).is_err() {
+        }
+    }
+
+    for consumer in consumer_threads {
+        consumer.join().unwrap();
+    }
+}
+
+pub fn bench_disruptor_queue(c: &mut Criterion) {
     let mut group = c.benchmark_group("queue");
     group.throughput(Throughput::Elements(SCALE_MSG_COUNT as u64));
     group.bench_function("queue_spsc", |b| b.iter(queue_spsc));
+    group.bench_function("queue_spmc", |b| b.iter(queue_spmc));
     group.finish();
 }
 
@@ -58,6 +105,6 @@ criterion_group!(
     config = Criterion::default()
         .measurement_time(Duration::from_secs(10))
         .sample_size(10);
-    targets = bench_crossbeam
+    targets = bench_disruptor_queue
 );
 criterion_main!(benches);
