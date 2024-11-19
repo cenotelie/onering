@@ -5,6 +5,7 @@
 //! Barriers to synchronise agents working on a common queue
 
 use alloc::sync::Arc;
+use core::cell::UnsafeCell;
 use core::fmt::Debug;
 use core::sync::atomic::{AtomicIsize, Ordering};
 
@@ -15,94 +16,143 @@ use super::Sequence;
 /// The output of a user of a queue, be it a producer or a consumer.
 /// For producers, this is the last sequence available to consumers.
 /// For consumers, this is the last item they finished handling that could then be consumed by other consumers.
-#[derive(Debug)]
-#[repr(transparent)]
-pub struct UserOutput {
-    /// The value for the published sequence
-    pub(crate) sequence: CachePadded<AtomicIsize>,
+pub trait Output: Debug + Send + Sync {
+    /// Get the published sequence using `Relaxed`
+    #[must_use]
+    fn published(&self) -> Sequence;
+
+    /// Write and publish the specificed sequence
+    fn commit(&self, sequence: Sequence);
+
+    /// Tries to commit and publish a sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns the current sequence if it was not the expected one
+    fn try_commit(&self, expected: Sequence, new: Sequence) -> Result<(), Sequence>;
 }
 
-impl Default for UserOutput {
+/// The output of a single queue user
+/// The construction of producers and consumers guarantee a single writer
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct OwnedOutput {
+    inner: CachePadded<UnsafeCell<isize>>,
+}
+
+unsafe impl Send for OwnedOutput {}
+unsafe impl Sync for OwnedOutput {}
+
+impl Default for OwnedOutput {
     fn default() -> Self {
         Self {
-            sequence: CachePadded::new(AtomicIsize::new(-1)),
+            inner: CachePadded::new(UnsafeCell::new(-1)),
         }
     }
 }
 
-impl UserOutput {
-    /// Get the published sequence using `Relaxed`
-    #[must_use]
-    #[inline]
-    pub fn published(&self) -> Sequence {
-        Sequence::from(self.sequence.load(Ordering::Acquire))
-    }
-
-    /// Write and publish the specificed sequence
-    #[inline]
-    pub fn commit(&self, sequence: Sequence) {
-        self.sequence.store(sequence.0, Ordering::Release);
-    }
-
-    /// Creates the output using an initial value
-    #[must_use]
-    pub fn new<I>(value: I) -> Self
-    where
-        I: Into<Sequence>,
-    {
-        let value: Sequence = value.into();
+impl OwnedOutput {
+    pub(crate) fn new(value: isize) -> Self {
         Self {
-            sequence: CachePadded::new(AtomicIsize::new(value.0)),
+            inner: CachePadded::new(UnsafeCell::new(value)),
+        }
+    }
+}
+
+impl Output for OwnedOutput {
+    #[inline]
+    fn published(&self) -> Sequence {
+        Sequence::from(unsafe { self.inner.get().read_volatile() })
+    }
+
+    #[inline]
+    fn commit(&self, sequence: Sequence) {
+        unsafe { self.inner.get().write_volatile(sequence.0) }
+    }
+
+    #[inline]
+    fn try_commit(&self, _expected: Sequence, new: Sequence) -> Result<(), Sequence> {
+        unsafe {
+            self.inner.get().write_volatile(new.0);
+        }
+        Ok(())
+    }
+}
+
+/// The common output for multiple queue users, usually concurrent producers
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct SharedOutput {
+    inner: CachePadded<AtomicIsize>,
+}
+
+impl Default for SharedOutput {
+    fn default() -> Self {
+        Self {
+            inner: CachePadded::new(AtomicIsize::new(-1)),
+        }
+    }
+}
+
+impl Output for SharedOutput {
+    #[inline]
+    fn published(&self) -> Sequence {
+        Sequence::from(self.inner.load(Ordering::Acquire))
+    }
+
+    #[inline]
+    fn commit(&self, sequence: Sequence) {
+        self.inner.store(sequence.0, Ordering::Release);
+    }
+
+    #[inline]
+    fn try_commit(&self, expected: Sequence, new: Sequence) -> Result<(), Sequence> {
+        if let Err(e) = self
+            .inner
+            .compare_exchange_weak(expected.0, new.0, Ordering::AcqRel, Ordering::Relaxed)
+        {
+            Err(Sequence::from(e))
+        } else {
+            Ok(())
         }
     }
 }
 
 /// A barrier to be used to await for available sequences
-pub trait Barrier: Debug + Send + Sync {
+pub trait Barrier: Debug + Clone + Send + Sync {
     /// Get the next sequence available through this barrier
     /// Use an observer's sequence to optimize in the case of a `MultiBarrier`
     #[must_use]
     fn next(&self, observer: Sequence) -> Sequence;
-
-    /// Clone the barrier
-    /// We cannot use `Clone` because it is not `dyn`-compatible
-    #[must_use]
-    fn duplicate(&self) -> Box<dyn Barrier>;
 }
 
 /// A barrier to be used to await for the output of a single other queue user, producer or consumer
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[repr(transparent)]
-pub struct SingleBarrier {
+pub struct SingleBarrier<O: ?Sized> {
     /// The single dependency
-    dependency: Arc<UserOutput>,
+    dependency: Arc<O>,
 }
 
-impl Barrier for SingleBarrier {
+impl<O> Clone for SingleBarrier<O> {
+    fn clone(&self) -> Self {
+        Self {
+            dependency: self.dependency.clone(),
+        }
+    }
+}
+
+impl<O: Output + 'static> Barrier for SingleBarrier<O> {
     #[inline]
     fn next(&self, _observer: Sequence) -> Sequence {
         self.dependency.published()
     }
-
-    fn duplicate(&self) -> Box<dyn Barrier> {
-        Box::new(SingleBarrier {
-            dependency: self.dependency.clone(),
-        })
-    }
 }
 
-impl SingleBarrier {
-    /// Creates a new barrier and the associated dependency
-    #[must_use]
-    pub(crate) fn new() -> Self {
-        Self {
-            dependency: Arc::new(UserOutput::default()),
-        }
-    }
-
+impl<O: Output + 'static> SingleBarrier<O> {
     /// Creates a barrier that awaits on a single output
     #[must_use]
-    pub fn await_on(dependency: &Arc<UserOutput>) -> Self {
+    pub fn await_on(dependency: &Arc<O>) -> Self {
         Self {
             dependency: dependency.clone(),
         }
@@ -110,24 +160,27 @@ impl SingleBarrier {
 
     /// Gets the dependency, i.e. the output for the user the barrier is waiting on
     #[must_use]
-    pub(crate) fn get_dependency(&self) -> &Arc<UserOutput> {
+    pub(crate) fn get_dependency(&self) -> &Arc<O> {
         &self.dependency
     }
 }
 
 /// A barrier to be used to await for the output of multiple other queue users, producer or consumers
-#[derive(Debug, Clone)]
-pub struct MultiBarrier {
+#[derive(Debug)]
+pub struct MultiBarrier<O: ?Sized> {
     /// All the dependencies
-    dependencies: Vec<Arc<UserOutput>>,
+    dependencies: Vec<Arc<O>>,
 }
 
-// SAFETY: Safe only when the `next` method is call by only one specific thread.
-// this is supposed to be the case by construction.
-unsafe impl Send for MultiBarrier {}
-unsafe impl Sync for MultiBarrier {}
+impl<O> Clone for MultiBarrier<O> {
+    fn clone(&self) -> Self {
+        Self {
+            dependencies: self.dependencies.clone(),
+        }
+    }
+}
 
-impl Barrier for MultiBarrier {
+impl<O: Output + 'static> Barrier for MultiBarrier<O> {
     #[inline]
     fn next(&self, _observer: Sequence) -> Sequence {
         self.dependencies.iter().map(|o| o.published()).min().unwrap_or_default()
@@ -165,15 +218,9 @@ impl Barrier for MultiBarrier {
         // }
         // min
     }
-
-    fn duplicate(&self) -> Box<dyn Barrier> {
-        Box::new(MultiBarrier {
-            dependencies: self.dependencies.clone(),
-        })
-    }
 }
 
-impl Default for MultiBarrier {
+impl<O> Default for MultiBarrier<O> {
     /// Creates a new empty barrier
     fn default() -> Self {
         Self {
@@ -182,10 +229,10 @@ impl Default for MultiBarrier {
     }
 }
 
-impl MultiBarrier {
+impl<O> MultiBarrier<O> {
     /// Creates a multi barrier that awaits on multiple outputs
     #[must_use]
-    pub fn await_on(dependencies: Vec<Arc<UserOutput>>) -> Self {
+    pub fn await_on(dependencies: Vec<Arc<O>>) -> Self {
         Self { dependencies }
     }
 
@@ -194,8 +241,8 @@ impl MultiBarrier {
     /// # Safety
     ///
     /// This method is only safe when called during the setup phase of the queue.
-    pub(crate) fn add_dependency(&mut self, output: &Arc<UserOutput>) {
-        self.dependencies.push(output.clone());
+    pub(crate) fn add_dependency(&mut self, output: Arc<O>) {
+        self.dependencies.push(output);
     }
 }
 
@@ -203,13 +250,13 @@ impl MultiBarrier {
 mod tests_multi_barrier {
     use alloc::sync::Arc;
 
-    use super::{MultiBarrier, UserOutput};
+    use super::{MultiBarrier, OwnedOutput};
     use crate::queue::barriers::Barrier;
     use crate::queue::Sequence;
 
     #[test]
     fn test_next_no_dep() {
-        let barrier = MultiBarrier::default();
+        let barrier = MultiBarrier::<OwnedOutput>::default();
         for i in -1..5_isize {
             assert_eq!(barrier.next(Sequence::from(i)), Sequence::default());
         }
@@ -217,7 +264,7 @@ mod tests_multi_barrier {
 
     fn test_next_single_dep_with_value(published: isize) {
         let mut barrier = MultiBarrier::default();
-        barrier.add_dependency(&Arc::new(UserOutput::new(published)));
+        barrier.add_dependency(Arc::new(OwnedOutput::new(published)));
         for observer in -1..(published + 4) {
             assert_eq!(barrier.next(Sequence::from(observer)), Sequence::from(published));
         }
@@ -233,7 +280,7 @@ mod tests_multi_barrier {
     fn test_next_multi_deps_with_values(published: &[isize], observer: isize, expected: isize) {
         let mut barrier = MultiBarrier::default();
         for &published in published {
-            barrier.add_dependency(&Arc::new(UserOutput::new(published)));
+            barrier.add_dependency(Arc::new(OwnedOutput::new(published)));
         }
         let r = barrier.next(Sequence::from(observer));
         assert_eq!(r, Sequence::from(expected));

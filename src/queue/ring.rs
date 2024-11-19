@@ -14,12 +14,12 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crossbeam_utils::CachePadded;
 
-use super::barriers::{Barrier, MultiBarrier, SingleBarrier, UserOutput};
+use super::barriers::{Barrier, MultiBarrier, Output, OwnedOutput, SharedOutput, SingleBarrier};
 use super::Sequence;
 
 /// A circular queue to be accessed by producer(s) and consumers
 #[derive(Debug)]
-pub struct RingBuffer<T> {
+pub struct RingBuffer<T, PO: Output + 'static> {
     /// The buffer containing the items themselves
     buffer: Box<[UnsafeCell<MaybeUninit<T>>]>,
     /// The mask to use for getting an index with the buffer
@@ -29,18 +29,18 @@ pub struct RingBuffer<T> {
     /// The value shared by all consumers, used to keep track of connected consumers
     pub(crate) consumers_shared: Arc<usize>,
     /// The barrier enabling awaiting on the producer(s)
-    pub(crate) producers_barrier: Arc<SingleBarrier>,
+    pub(crate) producers_barrier: SingleBarrier<PO>,
     /// The barriers associated to consumers so that the queue can know when an item has been used by all consumers
-    consumers_barrier: UnsafeCell<MultiBarrier>,
+    consumers_barrier: UnsafeCell<MultiBarrier<OwnedOutput>>,
     /// The tripwire to make `consumers_barrier` mutable only on the setup phase
     #[cfg(debug_assertions)]
     consumers_barrier_is_mutable: AtomicBool,
 }
 
 /// SAFETY: The implementation guards the access to elements, this is fine for as long as `T` is itself `Sync`
-unsafe impl<T> Sync for RingBuffer<T> where T: Sync {}
+unsafe impl<T, PO: Output + 'static> Sync for RingBuffer<T, PO> where T: Sync {}
 
-impl<T> Drop for RingBuffer<T> {
+impl<T, PO: Output + 'static> Drop for RingBuffer<T, PO> {
     fn drop(&mut self) {
         if core::mem::needs_drop::<T>() {
             // we need to drop all the items in the buffer
@@ -58,10 +58,26 @@ impl<T> Drop for RingBuffer<T> {
     }
 }
 
-impl<T> RingBuffer<T> {
-    /// Creates a new buffer
+impl<T> RingBuffer<T, OwnedOutput> {
+    /// Creates a new ring buffer that can only have a single producer
     #[must_use]
-    pub fn new(queue_size: usize) -> Self {
+    pub fn new_single_producer(queue_size: usize) -> Self {
+        Self::new(queue_size, OwnedOutput::default())
+    }
+}
+
+impl<T> RingBuffer<T, SharedOutput> {
+    /// Creates a new ring buffer that supports multiple producers
+    #[must_use]
+    pub fn new_multi_producer(queue_size: usize) -> Self {
+        Self::new(queue_size, SharedOutput::default())
+    }
+}
+
+impl<T, PO: Output + 'static> RingBuffer<T, PO> {
+    /// Creates a new ring buffer
+    #[must_use]
+    fn new(queue_size: usize, producers_output: PO) -> Self {
         assert!(queue_size.is_power_of_two(), "size must be power of two");
         let buffer = (0..queue_size)
             .map(|_i| UnsafeCell::new(MaybeUninit::uninit()))
@@ -71,7 +87,7 @@ impl<T> RingBuffer<T> {
             mask: queue_size - 1,
             producers_shared: Arc::new(CachePadded::new(AtomicUsize::new(0))),
             consumers_shared: Arc::new(0),
-            producers_barrier: Arc::new(SingleBarrier::new()),
+            producers_barrier: SingleBarrier::await_on(&Arc::new(producers_output)),
             consumers_barrier: UnsafeCell::new(MultiBarrier::default()),
             #[cfg(debug_assertions)]
             consumers_barrier_is_mutable: AtomicBool::new(true),
@@ -113,7 +129,7 @@ impl<T> RingBuffer<T> {
     }
 
     /// Register the output of a new consumer so that it can be correctly awaited on by the producers
-    pub(crate) fn register_consumer_output(&self, output: &Arc<UserOutput>) {
+    pub(crate) fn register_consumer_output(&self, output: Arc<OwnedOutput>) {
         #[cfg(debug_assertions)]
         {
             debug_assert!(self.consumers_barrier_is_mutable.load(Ordering::Acquire));
@@ -142,8 +158,7 @@ impl<T> RingBuffer<T> {
     /// This is safe for as long as no other thread is adding a consumer at the same time.
     #[must_use]
     #[inline]
-    #[allow(clippy::cast_possible_wrap)]
-    pub fn get_next_after_all_consumers(&self, observer: Sequence) -> Sequence {
+    pub(crate) fn get_next_after_all_consumers(&self, observer: Sequence) -> Sequence {
         #[cfg(debug_assertions)]
         {
             self.consumers_barrier_is_mutable.store(false, Ordering::Release);
@@ -158,13 +173,13 @@ mod tests_init {
 
     #[test]
     fn size_power_of_two() {
-        let _ring = RingBuffer::<usize>::new(16);
+        let _ring = RingBuffer::<usize, _>::new_single_producer(16);
     }
 
     #[test]
     #[should_panic(expected = "size must be power of two")]
     fn panic_on_non_power_of_two() {
-        let _ring = RingBuffer::<usize>::new(3);
+        let _ring = RingBuffer::<usize, _>::new_single_producer(3);
     }
 }
 
@@ -174,7 +189,7 @@ mod tests_drop {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use super::RingBuffer;
-    use crate::queue::Sequence;
+    use crate::queue::{Output, Sequence};
 
     struct DropCallback(Box<dyn Fn()>);
 
@@ -186,7 +201,7 @@ mod tests_drop {
 
     #[test]
     fn on_empty() {
-        let _ring = RingBuffer::<DropCallback>::new(16);
+        let _ring = RingBuffer::<DropCallback, _>::new_single_producer(16);
     }
 
     fn test_with_count(queue_size: usize, to_fill: usize, published: Option<Sequence>) {
@@ -202,7 +217,7 @@ mod tests_drop {
         }
 
         // create and fill the ring
-        let mut ring = RingBuffer::<DropCallback>::new(queue_size);
+        let mut ring = RingBuffer::<DropCallback, _>::new_single_producer(queue_size);
         let drop_count = Arc::new(AtomicUsize::new(0));
         for i in 0..to_fill {
             ring.buffer[i].get_mut().write(DropCallback(Box::new({
@@ -241,7 +256,7 @@ mod tests_drop {
 
     #[test]
     fn drop_on_write() {
-        let ring = RingBuffer::<DropCallback>::new(4);
+        let ring = RingBuffer::<DropCallback, _>::new_single_producer(4);
         let drop_count = Arc::new(AtomicUsize::new(0));
 
         // fill the buffer

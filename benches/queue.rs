@@ -15,8 +15,8 @@ pub const SCALE_PRODUCERS: usize = 5;
 pub const SCALE_CONSUMERS: usize = 5;
 
 fn queue_spsc() {
-    let ring = Arc::new(RingBuffer::<usize>::new(SCALE_QUEUE_SIZE));
-    let mut consumer = Consumer::new_for_ring(ring.clone(), ConsumerMode::Blocking);
+    let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(SCALE_QUEUE_SIZE));
+    let mut consumer = Consumer::new(ring.clone(), ConsumerMode::Blocking);
     let mut producer = SingleProducer::new(ring);
 
     let consumer = std::thread::spawn({

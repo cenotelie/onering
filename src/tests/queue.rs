@@ -63,7 +63,10 @@ fn queue_spsc() {
     let end = consumer.join().unwrap();
     let duration = end.duration_since(start).as_secs_f64();
     let throughput = (SCALE_MSG_COUNT as f64) / duration;
-    println!("queue_spsc queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, throughput={:.03}M", throughput / 1_000_000.0);
+    println!(
+        "queue_spsc queue_size={SCALE_QUEUE_SIZE}, items={SCALE_MSG_COUNT}, throughput={:.03}M",
+        throughput / 1_000_000.0
+    );
 }
 
 // #[test]

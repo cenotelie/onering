@@ -11,7 +11,7 @@ mod ring;
 
 use alloc::sync::Arc;
 
-pub use barriers::{MultiBarrier, SingleBarrier, UserOutput};
+pub use barriers::{MultiBarrier, Output, OwnedOutput, SharedOutput, SingleBarrier};
 pub use consumers::{Consumer, ConsumerAccess, ConsumerMode};
 pub use producers::{ConcurrentProducer, SingleProducer};
 pub use ring::RingBuffer;
@@ -70,12 +70,16 @@ impl Sequence {
 pub trait QueueUser {
     /// The type of the queue items
     type Item;
+    /// The type of output for thsi user
+    type UserOutput: Output + 'static;
+    /// The type fpr the producer's output
+    type ProducerOutput: Output + 'static;
 
     /// Gets the queue itself
-    fn queue(&self) -> &Arc<RingBuffer<Self::Item>>;
+    fn queue(&self) -> &Arc<RingBuffer<Self::Item, Self::ProducerOutput>>;
 
     /// Gets the output that can be awaited on for items that are available *after* this user
-    fn output(&self) -> &Arc<UserOutput>;
+    fn output(&self) -> &Arc<Self::UserOutput>;
 }
 
 #[cfg(test)]
@@ -89,17 +93,19 @@ mod tests_send_sync {
 
     #[test]
     fn ring_is_send_sync() {
-        let ring = RingBuffer::<usize>::new(4);
+        let ring = RingBuffer::<usize, _>::new_single_producer(4);
         assert_send(&ring);
         assert_sync(&ring);
     }
 
     #[test]
     fn producers_are_send_sync() {
-        let ring = Arc::new(RingBuffer::<usize>::new(4));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(4));
         let producer_single = SingleProducer::new(ring.clone());
         assert_send(&producer_single);
         assert_sync(&producer_single);
+
+        let ring = Arc::new(RingBuffer::<usize, _>::new_multi_producer(4));
         let producer_concurrent = ConcurrentProducer::new(ring.clone());
         assert_send(&producer_concurrent);
         assert_sync(&producer_concurrent);
@@ -107,7 +113,7 @@ mod tests_send_sync {
 
     #[test]
     fn consumer_is_send_sync() {
-        let ring = Arc::new(RingBuffer::<usize>::new(4));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(4));
         let producer_single = SingleProducer::new(ring.clone());
         let consumer = Consumer::new_awaiting_on(&producer_single, ConsumerMode::default());
         assert_send(&consumer);
@@ -133,9 +139,9 @@ mod tests_concurrency_stress {
 
     #[test]
     fn spsc() {
-        let ring = Arc::new(RingBuffer::<usize>::new(SCALE_QUEUE_SIZE));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(SCALE_QUEUE_SIZE));
         let mut sender = SingleProducer::new(ring.clone());
-        let mut receiver = Consumer::new_for_ring(ring.clone(), ConsumerMode::Blocking);
+        let mut receiver = Consumer::new(ring.clone(), ConsumerMode::Blocking);
 
         let consumer = std::thread::spawn(move || {
             let mut outputs = Vec::with_capacity(SCALE_MSG_COUNT);
@@ -179,10 +185,10 @@ mod tests_concurrency_stress {
 
     #[test]
     fn spmc() {
-        let ring = Arc::new(RingBuffer::<usize>::new(SCALE_QUEUE_SIZE));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(SCALE_QUEUE_SIZE));
         let mut sender = SingleProducer::new(ring.clone());
         let mut receivers = (0..SCALE_CONSUMERS)
-            .map(|_| Consumer::new_for_ring(ring.clone(), ConsumerMode::Blocking))
+            .map(|_| Consumer::new(ring.clone(), ConsumerMode::Blocking))
             .collect::<Vec<_>>();
 
         let consumers = (0..SCALE_CONSUMERS)
@@ -234,12 +240,12 @@ mod tests_concurrency_stress {
 
     #[test]
     fn mpmc() {
-        let ring = Arc::new(RingBuffer::<usize>::new(SCALE_QUEUE_SIZE));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_multi_producer(SCALE_QUEUE_SIZE));
         let mut senders = (0..SCALE_PRODUCERS)
             .map(|_| ConcurrentProducer::new(ring.clone()))
             .collect::<Vec<_>>();
         let mut receivers = (0..SCALE_CONSUMERS)
-            .map(|_| Consumer::new_for_ring(ring.clone(), ConsumerMode::Blocking))
+            .map(|_| Consumer::new(ring.clone(), ConsumerMode::Blocking))
             .collect::<Vec<_>>();
 
         let consumers = (0..SCALE_CONSUMERS)

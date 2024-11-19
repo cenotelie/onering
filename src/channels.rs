@@ -9,15 +9,26 @@ use alloc::sync::Arc;
 use crossbeam_utils::Backoff;
 
 use crate::errors::{RecvError, SendError, TryRecvError, TrySendError};
-use crate::queue::{ConcurrentProducer, Consumer, ConsumerAccess, ConsumerMode, RingBuffer, SingleProducer};
+use crate::queue::{
+    ConcurrentProducer, Consumer, ConsumerAccess, ConsumerMode, Output, OwnedOutput, RingBuffer, SharedOutput, SingleBarrier,
+    SingleProducer,
+};
 
 /// A receiver for a channel
-#[derive(Debug, Clone)]
-pub struct Receiver<T> {
-    consumer: Consumer<T>,
+#[derive(Debug)]
+pub struct Receiver<T, PO: Output + 'static> {
+    consumer: Consumer<T, PO, SingleBarrier<PO>>,
 }
 
-impl<T> Receiver<T> {
+impl<T, PO: Output + 'static> Clone for Receiver<T, PO> {
+    fn clone(&self) -> Self {
+        Self {
+            consumer: self.consumer.clone(),
+        }
+    }
+}
+
+impl<T, PO: Output + 'static> Receiver<T, PO> {
     /// Gets whether the other side is disconnected
     #[must_use]
     #[inline]
@@ -60,7 +71,7 @@ impl<T> Receiver<T> {
     ///
     /// Returns an error when the channel is empty, or no sender is connected
     #[inline]
-    pub fn try_recv(&mut self) -> Result<ConsumerAccess<'_, T>, TryRecvError> {
+    pub fn try_recv(&mut self) -> Result<ConsumerAccess<'_, T, PO, SingleBarrier<PO>>, TryRecvError> {
         self.consumer.try_recv()
     }
 
@@ -70,14 +81,17 @@ impl<T> Receiver<T> {
     /// # Errors
     ///
     /// Returns an error when no sender is connected
-    pub fn recv(&mut self) -> Result<ConsumerAccess<'_, T>, RecvError> {
+    pub fn recv(&mut self) -> Result<ConsumerAccess<'_, T, PO, SingleBarrier<PO>>, RecvError> {
         let backoff = Backoff::new();
         loop {
             match self.consumer.try_recv() {
                 Ok(items) => {
                     return unsafe {
                         // SAFETY: transmute the lifetime due to compiler issues
-                        Ok(core::mem::transmute::<ConsumerAccess<'_, T>, ConsumerAccess<'_, T>>(items))
+                        Ok(core::mem::transmute::<
+                            ConsumerAccess<'_, T, PO, SingleBarrier<PO>>,
+                            ConsumerAccess<'_, T, PO, SingleBarrier<PO>>,
+                        >(items))
                     };
                 }
                 Err(TryRecvError::Empty) => {
@@ -193,9 +207,9 @@ impl<T> Sender for SpSender<T> {
 /// Creates a single producer, multiple consumers queue.
 /// All consumers receive all items, meaning this is a dispatch queue.
 #[must_use]
-pub fn spmc<T>(queue_size: usize) -> (SpSender<T>, Receiver<T>) {
-    let producer = SingleProducer::new(Arc::new(RingBuffer::new(queue_size)));
-    let consumer = Consumer::new_for_ring(producer.ring.clone(), ConsumerMode::Blocking);
+pub fn spmc<T>(queue_size: usize) -> (SpSender<T>, Receiver<T, OwnedOutput>) {
+    let producer = SingleProducer::new(Arc::new(RingBuffer::new_single_producer(queue_size)));
+    let consumer = Consumer::new(producer.ring.clone(), ConsumerMode::Blocking);
     (SpSender { producer }, Receiver { consumer })
 }
 
@@ -257,9 +271,9 @@ impl<T> Sender for MpSender<T> {
 /// Creates a multiple producers, multiple consumers queue.
 /// All consumers receive all items, meaning this is a dispatch queue.
 #[must_use]
-pub fn mpmc<T>(queue_size: usize) -> (MpSender<T>, Receiver<T>) {
-    let producer = ConcurrentProducer::new(Arc::new(RingBuffer::new(queue_size)));
-    let consumer = Consumer::new_for_ring(producer.ring.clone(), ConsumerMode::Blocking);
+pub fn mpmc<T>(queue_size: usize) -> (MpSender<T>, Receiver<T, SharedOutput>) {
+    let producer = ConcurrentProducer::new(Arc::new(RingBuffer::new_multi_producer(queue_size)));
+    let consumer = Consumer::new(producer.ring.clone(), ConsumerMode::Blocking);
     (MpSender { producer }, Receiver { consumer })
 }
 
