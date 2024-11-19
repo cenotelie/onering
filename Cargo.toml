@@ -19,9 +19,13 @@ crossbeam-utils = "0.8"
 [dev-dependencies]
 criterion = "0.5"
 crossbeam = "0.8"
+disruptor-rs = "0.1.1"
 
 [[bench]]
 name = "crossbeam"
+harness = false
+[[bench]]
+name = "disruptor-rs"
 harness = false
 [[bench]]
 name = "queue"

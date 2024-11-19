@@ -83,8 +83,7 @@ fn queue_spmc() {
         .collect::<Vec<_>>();
 
     for item in 0..SCALE_MSG_COUNT {
-        while producer.try_push(item).is_err() {
-        }
+        while producer.try_push(item).is_err() {}
     }
 
     for consumer in consumer_threads {

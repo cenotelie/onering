@@ -204,6 +204,17 @@ dependencies = [
  "criterion",
  "crossbeam",
  "crossbeam-utils",
+ "disruptor-rs",
+]
+
+[[package]]
+name = "disruptor-rs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b24e9339599d5de4c2b485a4b297fc0e06f70217f720e68f85801fee56837744"
+dependencies = [
+ "criterion",
+ "crossbeam-channel",
 ]
 
 [[package]]
