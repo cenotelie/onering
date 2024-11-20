@@ -51,14 +51,14 @@ let consumer_threads = (0..5)
     })
     .collect::<Vec<_>>();
 
-    for item in 0..1000 {
-        while producer.try_push(item).is_err() {}
-    }
-    drop(producer); // so that `TryRecvError::Disconnected` is raised
+for item in 0..1000 {
+    while producer.try_push(item).is_err() {}
+}
+drop(producer); // so that `TryRecvError::Disconnected` is raised
 
-    for consumer in consumer_threads {
-        consumer.join().unwrap();
-    }
+for consumer in consumer_threads {
+    consumer.join().unwrap();
+}
 ```
 
 ## Contributing
