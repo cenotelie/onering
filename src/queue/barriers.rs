@@ -15,7 +15,7 @@ use super::Sequence;
 
 /// The output of a user of a queue, be it a producer or a consumer.
 /// For producers, this is the last sequence available to consumers.
-/// For consumers, this is the last item they finished handling that could then be consumed by other consumers.
+/// For consumers, this is the last item they finished handling that could then be seen by other downchain consumers.
 pub trait Output: Debug + Send + Sync {
     /// Get the published sequence using `Relaxed`
     #[must_use]

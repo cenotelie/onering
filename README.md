@@ -8,7 +8,7 @@
 
 High throughput synchronous queue and channels.
 The implementation of the queue is freely inspired by the [LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor).
-As in a typical disruptor-fashion, consumers typically receive all items pushed onto the queue.
+As in a typical disruptor fashion, consumers see all items pushed onto the queue.
 The implementation is then better suited for dispatching all items to all consumers.
 
 Therefore, the queue provided here do not allow sending the ownership of queued items onto other threads.
@@ -60,6 +60,13 @@ for consumer in consumer_threads {
     consumer.join().unwrap();
 }
 ```
+
+
+## `no-std` support
+
+`onering` is compatible with `no-std` context, having a `std` feature which is activated by default.
+To use `onering` without the `std`, deactivate the default features in your `Cargo.toml` file.
+
 
 ## Contributing
 

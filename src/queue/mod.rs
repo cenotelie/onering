@@ -2,7 +2,8 @@
  * Copyright (c) 2024 Cénotélie Opérations SAS (cenotelie.fr)
  ******************************************************************************/
 
-//! Disruptor-inspired queue
+//! Disruptor-inspired queue.
+//! The queue implemented in this module is based on a ring buffer, with producers and consumers accessing it in an orderly fashion.
 
 mod barriers;
 mod consumers;
@@ -17,7 +18,13 @@ pub use producers::{ConcurrentProducer, SingleProducer};
 pub use ring::RingBuffer;
 
 /// The position of an item in the queue.
-/// This also uniquely identifies the item within the queue and is usedby queue users to keep track of what items are still expected or consumed.
+/// This also uniquely identifies the item within the queue and is used by queue users to keep track of what items are still expected or consumed.
+/// `Sequence` has two usages:
+/// * identify the last items pushed onto the queue so that consumers can access them,
+/// * act as an index within the backing ring buffer to access the corresponding item.
+/// 
+/// `Sequence` is a wrapper type for `isize`. The default value is `-1`, meaning there are no item.
+/// For positive values, `Sequence` can be coerce into `usize` with `as_index` to obtain the an index that can be used by the ring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Sequence(isize);
@@ -50,14 +57,15 @@ impl From<usize> for Sequence {
 }
 
 impl Sequence {
-    /// Gets whether this sequence represents a valid item
+    /// Gets whether this sequence represents a valid item.
+    /// This means whether the value is 0 or more. A negative value would mean no associated item.
     #[must_use]
     #[inline]
     pub fn is_valid_item(self) -> bool {
         self.0 >= 0
     }
 
-    /// Gets the value of the sequence that can be used as an index within the buffer
+    /// Gets the value of the sequence that can be used as an index within the ring buffer
     #[must_use]
     #[inline]
     pub fn as_index(self) -> usize {
@@ -67,12 +75,16 @@ impl Sequence {
 }
 
 /// The user of a queue, be it a producer or a consumer
+/// This trait abstracts over producers and consumers so that the associated `UserOutput` can be retrieved.
+/// The `UserOutput` can be used in turn to await items published by the queue user.
+/// This enables the construction of consumers that await the items directly from producer,
+/// but also from one or more other producers using an appropriate `Barrier`.
 pub trait QueueUser {
     /// The type of the queue items
     type Item;
-    /// The type of output for thsi user
+    /// The type of output for this user
     type UserOutput: Output + 'static;
-    /// The type fpr the producer's output
+    /// The type for the producer's output
     type ProducerOutput: Output + 'static;
 
     /// Gets the queue itself
