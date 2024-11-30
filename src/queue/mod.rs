@@ -22,7 +22,7 @@ pub use ring::RingBuffer;
 /// `Sequence` has two usages:
 /// * identify the last items pushed onto the queue so that consumers can access them,
 /// * act as an index within the backing ring buffer to access the corresponding item.
-/// 
+///
 /// `Sequence` is a wrapper type for `isize`. The default value is `-1`, meaning there are no item.
 /// For positive values, `Sequence` can be coerce into `usize` with `as_index` to obtain the an index that can be used by the ring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

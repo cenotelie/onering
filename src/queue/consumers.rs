@@ -88,7 +88,7 @@ pub struct ConsumerAccess<'a, T, PO: Output + 'static, B> {
     next: usize,
 }
 
-impl<'a, T, PO: Output + 'static, B> Deref for ConsumerAccess<'a, T, PO, B> {
+impl<T, PO: Output + 'static, B> Deref for ConsumerAccess<'_, T, PO, B> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
@@ -96,7 +96,7 @@ impl<'a, T, PO: Output + 'static, B> Deref for ConsumerAccess<'a, T, PO, B> {
     }
 }
 
-impl<'a, T, PO: Output + 'static, B> Drop for ConsumerAccess<'a, T, PO, B> {
+impl<T, PO: Output + 'static, B> Drop for ConsumerAccess<'_, T, PO, B> {
     fn drop(&mut self) {
         self.parent.publish.commit(self.last_id);
     }
@@ -116,7 +116,7 @@ impl<'a, T, PO: Output + 'static, B> Iterator for ConsumerAccess<'a, T, PO, B> {
     }
 }
 
-impl<'a, T, PO: Output + 'static, B> ExactSizeIterator for ConsumerAccess<'a, T, PO, B> {
+impl<T, PO: Output + 'static, B> ExactSizeIterator for ConsumerAccess<'_, T, PO, B> {
     fn len(&self) -> usize {
         self.items.len()
     }

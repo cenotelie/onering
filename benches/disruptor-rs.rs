@@ -1,4 +1,5 @@
-use std::{cell::Cell, time::Duration};
+use std::cell::Cell;
+use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use disruptor_rs::{DisruptorBuilder, EventHandler, EventProcessorExecutor, EventProducer, ExecutorHandle};
