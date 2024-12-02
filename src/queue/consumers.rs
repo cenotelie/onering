@@ -248,8 +248,9 @@ impl<T, PO: Output + 'static, B: Barrier> Consumer<T, PO, B> {
         }
         if published >= self.next + self.ring.capacity() {
             // lagging
+            let missed = published - self.next + 1;
             self.next = published; // skip
-            return Err(TryRecvError::Lagging(published - self.next + 1));
+            return Err(TryRecvError::Lagging(missed));
         }
         // some item are ready
         let end_of_ring = self.next | self.ring.mask;
@@ -294,8 +295,9 @@ impl<T, PO: Output + 'static, B: Barrier> Consumer<T, PO, B> {
         }
         if published >= self.next + self.ring.capacity() {
             // lagging
+            let missed = published - self.next + 1;
             self.next = published; // skip
-            return Err(TryRecvError::Lagging(published - self.next + 1));
+            return Err(TryRecvError::Lagging(missed));
         }
         // some item are ready
         let end_of_buffer = self.next + buffer.len() - 1;
