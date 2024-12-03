@@ -12,6 +12,7 @@ use core::sync::atomic::{AtomicIsize, Ordering};
 use crossbeam_utils::CachePadded;
 
 use super::Sequence;
+use crate::utils::arm_memory_barrier;
 
 /// The output of a user of a queue, be it a producer or a consumer.
 /// For producers, this is the last sequence available to consumers.
@@ -62,16 +63,20 @@ impl OwnedOutput {
 impl Output for OwnedOutput {
     #[inline]
     fn published(&self) -> Sequence {
-        Sequence::from(unsafe { self.inner.get().read_volatile() })
+        let r = Sequence::from(unsafe { self.inner.get().read_volatile() });
+        arm_memory_barrier();
+        r
     }
 
     #[inline]
     fn commit(&self, sequence: Sequence) {
+        arm_memory_barrier();
         unsafe { self.inner.get().write_volatile(sequence.0) }
     }
 
     #[inline]
     fn try_commit(&self, _expected: Sequence, new: Sequence) -> Result<(), Sequence> {
+        arm_memory_barrier();
         unsafe {
             self.inner.get().write_volatile(new.0);
         }
