@@ -9,7 +9,7 @@
 /// See [DMB](https://developer.arm.com/documentation/dui0489/c/arm-and-thumb-instructions/miscellaneous-instructions/dmb--dsb--and-isb)
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 #[inline]
-pub fn arm_memory_barriers() {
+pub fn arm_memory_barrier() {
     use core::arch::asm;
     unsafe { asm!("dmb sy") }
 }
