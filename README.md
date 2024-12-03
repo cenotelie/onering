@@ -1,6 +1,6 @@
 <div align="center">
   <h1>Onering</h1>
-    <strong>High throughput synchronous channels</strong>
+    <strong>High throughput synchronous queue</strong>
   </a>
   <br>
   <br>
@@ -13,9 +13,11 @@ The implementation is then better suited for dispatching all items to all consum
 
 Therefore, the queue provided here do not allow sending the ownership of queued items onto other threads.
 Instead, receivers (consumers) will only see immutable references to the items.
+When items can be copied (implements `Copy`), copies can be obtained instead.
 
 ## Example
 
+Create a queue with a single producer and 5 event consumers.
 ```rust
 use std::sync::Arc;
 use onering::errors::TryRecvError;

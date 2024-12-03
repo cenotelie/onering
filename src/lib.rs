@@ -11,11 +11,12 @@
 //!
 //! Therefore, the queue provided here do not allow sending the ownership of queued items onto other threads.
 //! Instead, receivers (consumers) will only see immutable references to the items.
+//! When items can be copied (implements `Copy`), copies can be obtained instead.
 //!
 //!
 //! ## Example
 //!
-//! Create a queue with a single producer and 5 event handles.
+//! Create a queue with a single producer and 5 event consumers.
 //! ```
 //! use std::sync::Arc;
 //! use onering::errors::TryRecvError;

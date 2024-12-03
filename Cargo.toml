@@ -2,7 +2,7 @@
 name = "onering"
 version = "0.1.0"
 authors = ["Laurent Wouters <lwouters@cenotelie.fr>"]
-description = "High throughput synchronous channels"
+description = "High throughput synchronous queue"
 repository = "https://github.com/cenotelie/onering"
 homepage = "https://github.com/cenotelie/onering"
 documentation = "https://github.com/cenotelie/onering"
