@@ -23,6 +23,8 @@ pub struct SingleProducer<T> {
     next: usize,
     /// The owned output used to signal when an item is published
     publish: Arc<OwnedOutput>,
+    /// The cache for the consumer's last published sequence
+    cache_last_seq: Sequence,
     /// The ring itself
     pub(crate) ring: Arc<RingBuffer<T, OwnedOutput>>,
 }
@@ -56,6 +58,7 @@ impl<T> SingleProducer<T> {
             _shared_next: ring.producers_shared.clone(),
             next: 0,
             publish: ring.producers_barrier.get_dependency().clone(),
+            cache_last_seq: Sequence::default(),
             ring,
         }
     }
@@ -78,7 +81,9 @@ impl<T> SingleProducer<T> {
     ///
     /// This returns a `TrySendError` when the queue is full or there no longer are any consumer
     pub fn try_push(&mut self, item: T) -> Result<(), TrySendError<T>> {
-        let last_seq = self.ring.get_next_after_all_consumers(Sequence::from(self.next));
+        let last_seq = self
+            .ring
+            .get_next_after_all_consumers_with_cache(Sequence::from(self.next), &mut self.cache_last_seq);
         let current_count = if last_seq.is_valid_item() {
             self.next - last_seq.as_index() - 1
         } else {
@@ -281,6 +286,8 @@ pub struct ConcurrentProducer<T> {
     shared_next: Arc<CachePadded<AtomicUsize>>,
     /// The owned output used to signal when an item is published
     publish: Arc<SharedOutput>,
+    /// The cache for the consumer's last published sequence
+    cache_last_seq: Sequence,
     /// The ring itself
     pub(crate) ring: Arc<RingBuffer<T, SharedOutput>>,
 }
@@ -308,6 +315,7 @@ impl<T> ConcurrentProducer<T> {
         Self {
             shared_next: ring.producers_shared.clone(),
             publish: ring.producers_barrier.get_dependency().clone(),
+            cache_last_seq: Sequence::default(),
             ring,
         }
     }
@@ -340,7 +348,9 @@ impl<T> ConcurrentProducer<T> {
     pub fn try_push(&mut self, item: T) -> Result<(), TrySendError<T>> {
         let backoff = Backoff::new();
         let mut next = self.shared_next.load(Ordering::Acquire);
-        let last_seq = self.ring.get_next_after_all_consumers(Sequence::from(next));
+        let last_seq = self
+            .ring
+            .get_next_after_all_consumers_with_cache(Sequence::from(next), &mut self.cache_last_seq);
 
         loop {
             let current_count = if last_seq.is_valid_item() {

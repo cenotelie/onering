@@ -165,6 +165,28 @@ impl<T, PO: Output + 'static> RingBuffer<T, PO> {
         }
         unsafe { &*self.consumers_barrier.get() }.next(observer)
     }
+
+    /// Gets the next item that was seen by all consumers
+    ///
+    /// # Safety
+    ///
+    /// This is safe for as long as no other thread is adding a consumer at the same time.
+    #[must_use]
+    pub(crate) fn get_next_after_all_consumers_with_cache(&self, observer: Sequence, cache: &mut Sequence) -> Sequence {
+        #[cfg(debug_assertions)]
+        {
+            self.consumers_barrier_is_mutable.store(false, Ordering::Release);
+        }
+        let current_count = if cache.is_valid_item() {
+            observer.as_index() - cache.as_index() - 1
+        } else {
+            observer.as_index()
+        };
+        if current_count >= self.capacity() {
+            *cache = unsafe { &*self.consumers_barrier.get() }.next(observer);
+        }
+        *cache
+    }
 }
 
 #[cfg(test)]

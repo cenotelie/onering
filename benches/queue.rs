@@ -24,6 +24,12 @@ fn queue_spsc() {
         move || {
             let mut next = 0;
             while next != SCALE_MSG_COUNT {
+                let waiting = consumer.get_number_of_items();
+                if waiting < 20 && next + waiting < SCALE_MSG_COUNT {
+                    let backoff = Backoff::new();
+                    backoff.spin();
+                    continue;
+                }
                 match consumer.try_recv() {
                     Ok(items) => {
                         for &item in items {
