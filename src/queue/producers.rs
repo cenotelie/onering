@@ -155,7 +155,7 @@ mod tests_single {
 
     #[test]
     fn nb_of_items_no_consumer() {
-        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(4));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(4, 16));
         let mut producer = SingleProducer::new(ring);
 
         assert_eq!(producer.get_number_of_items(), 0);
@@ -171,9 +171,9 @@ mod tests_single {
 
     #[test]
     fn nb_of_items_with_consumer() {
-        let ring = RingBuffer::<usize, _>::new_single_producer(4);
+        let ring = RingBuffer::<usize, _>::new_single_producer(4, 16);
         let consumer_output = Arc::new(OwnedOutput::new(-1_isize));
-        ring.register_consumer_output(consumer_output.clone());
+        ring.register_consumer_output(consumer_output.clone()).unwrap();
         let ring = Arc::new(ring);
         let mut producer = SingleProducer::new(ring);
 
@@ -198,10 +198,10 @@ mod tests_single {
 
     #[test]
     fn try_push_until_full() {
-        let ring = RingBuffer::<usize, _>::new_single_producer(4);
+        let ring = RingBuffer::<usize, _>::new_single_producer(4, 16);
         let mock_consumer_shared = ring.consumers_shared.clone();
         let consumer_output = Arc::new(OwnedOutput::new(-1_isize));
-        ring.register_consumer_output(consumer_output);
+        ring.register_consumer_output(consumer_output).unwrap();
         let ring = Arc::new(ring);
         let mut producer = SingleProducer::new(ring);
 
@@ -225,10 +225,10 @@ mod tests_single {
 
     #[test]
     fn try_push_on_full() {
-        let ring = RingBuffer::<usize, _>::new_single_producer(4);
+        let ring = RingBuffer::<usize, _>::new_single_producer(4, 16);
         let mock_consumer_shared = ring.consumers_shared.clone();
         let consumer_output = Arc::new(OwnedOutput::new(-1_isize));
-        ring.register_consumer_output(consumer_output);
+        ring.register_consumer_output(consumer_output).unwrap();
         let ring = Arc::new(ring);
         let mut producer = SingleProducer::new(ring);
 
@@ -244,10 +244,10 @@ mod tests_single {
 
     #[test]
     fn try_push_with_consumer() {
-        let ring = RingBuffer::<usize, _>::new_single_producer(4);
+        let ring = RingBuffer::<usize, _>::new_single_producer(4, 16);
         let _mock_consumer_shared = ring.consumers_shared.clone();
         let consumer_output = Arc::new(OwnedOutput::new(-1_isize));
-        ring.register_consumer_output(consumer_output.clone());
+        ring.register_consumer_output(consumer_output.clone()).unwrap();
         let ring = Arc::new(ring);
         let mut producer = SingleProducer::new(ring);
 
@@ -414,7 +414,7 @@ mod tests_concurrent {
 
     #[test]
     fn nb_of_items_no_consumer() {
-        let ring = Arc::new(RingBuffer::<usize, _>::new_multi_producer(4));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_multi_producer(4, 16));
         let producer = ConcurrentProducer::new(ring);
 
         assert_eq!(producer.get_number_of_items(), 0);
@@ -430,9 +430,9 @@ mod tests_concurrent {
 
     #[test]
     fn nb_of_items_with_consumer() {
-        let ring = RingBuffer::<usize, _>::new_multi_producer(4);
+        let ring = RingBuffer::<usize, _>::new_multi_producer(4, 16);
         let consumer_output = Arc::new(OwnedOutput::new(-1_isize));
-        ring.register_consumer_output(consumer_output.clone());
+        ring.register_consumer_output(consumer_output.clone()).unwrap();
         let ring = Arc::new(ring);
         let producer = ConcurrentProducer::new(ring);
 
@@ -457,10 +457,10 @@ mod tests_concurrent {
 
     #[test]
     fn try_push_until_full() {
-        let ring = RingBuffer::<usize, _>::new_multi_producer(4);
+        let ring = RingBuffer::<usize, _>::new_multi_producer(4, 16);
         let mock_consumer_shared = ring.consumers_shared.clone();
         let consumer_output = Arc::new(OwnedOutput::new(-1_isize));
-        ring.register_consumer_output(consumer_output.clone());
+        ring.register_consumer_output(consumer_output.clone()).unwrap();
         let ring = Arc::new(ring);
         let mut producer = ConcurrentProducer::new(ring);
 
@@ -484,10 +484,10 @@ mod tests_concurrent {
 
     #[test]
     fn try_push_on_full() {
-        let ring = RingBuffer::<usize, _>::new_multi_producer(4);
+        let ring = RingBuffer::<usize, _>::new_multi_producer(4, 16);
         let mock_consumer_shared = ring.consumers_shared.clone();
         let consumer_output = Arc::new(OwnedOutput::new(-1_isize));
-        ring.register_consumer_output(consumer_output.clone());
+        ring.register_consumer_output(consumer_output.clone()).unwrap();
         let ring = Arc::new(ring);
         let mut producer = ConcurrentProducer::new(ring);
 
@@ -503,10 +503,10 @@ mod tests_concurrent {
 
     #[test]
     fn try_push_with_consumer() {
-        let ring = RingBuffer::<usize, _>::new_multi_producer(4);
+        let ring = RingBuffer::<usize, _>::new_multi_producer(4, 16);
         let _mock_consumer_shared = ring.consumers_shared.clone();
         let consumer_output = Arc::new(OwnedOutput::new(-1_isize));
-        ring.register_consumer_output(consumer_output.clone());
+        ring.register_consumer_output(consumer_output.clone()).unwrap();
         let ring = Arc::new(ring);
         let mut producer = ConcurrentProducer::new(ring);
 

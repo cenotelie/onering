@@ -22,9 +22,9 @@
 //! use onering::errors::TryRecvError;
 //! use onering::queue::{Consumer, ConsumerMode, RingBuffer, SingleProducer};
 //!
-//! let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(256));
+//! let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(256, 16));
 //! let mut consumers = (0..5)
-//!     .map(|_| Consumer::new(ring.clone(), ConsumerMode::Blocking))
+//!     .map(|_| Consumer::new(ring.clone(), ConsumerMode::Blocking).unwrap())
 //!     .collect::<Vec<_>>();
 //! let mut producer = SingleProducer::new(ring);
 //!

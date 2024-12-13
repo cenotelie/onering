@@ -8,6 +8,7 @@ use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::fmt::Debug;
 use core::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use crossbeam_utils::CachePadded;
 
@@ -173,14 +174,26 @@ impl<O: Output + 'static> SingleBarrier<O> {
 /// A barrier to be used to await for the output of multiple other queue users, producer or consumers
 #[derive(Debug)]
 pub struct MultiBarrier<O: ?Sized> {
+    /// The maximum number of dependencies
+    pub(crate) max_dependencies: usize,
     /// All the dependencies
-    dependencies: Vec<Arc<O>>,
+    dependencies: UnsafeCell<Vec<Arc<O>>>,
+    /// Whether the barrier is locked when modifying the dependencies
+    lock: AtomicBool,
 }
+
+unsafe impl<O> Sync for MultiBarrier<O> {}
 
 impl<O> Clone for MultiBarrier<O> {
     fn clone(&self) -> Self {
+        let mut dependencies = Vec::with_capacity(self.max_dependencies);
+        for dep in self.get_dependencies() {
+            dependencies.push(dep.clone());
+        }
         Self {
-            dependencies: self.dependencies.clone(),
+            max_dependencies: self.max_dependencies,
+            dependencies: UnsafeCell::new(dependencies),
+            lock: AtomicBool::new(false),
         }
     }
 }
@@ -188,7 +201,11 @@ impl<O> Clone for MultiBarrier<O> {
 impl<O: Output + 'static> Barrier for MultiBarrier<O> {
     #[inline]
     fn next(&self, _observer: Sequence) -> Sequence {
-        self.dependencies.iter().map(|o| o.published()).min().unwrap_or_default()
+        self.get_dependencies()
+            .iter()
+            .map(|o| o.published())
+            .min()
+            .unwrap_or_default()
         // if self.dependencies.is_empty() {
         //     // short circuit to simplify return
         //     return Sequence::default();
@@ -225,29 +242,67 @@ impl<O: Output + 'static> Barrier for MultiBarrier<O> {
     }
 }
 
-impl<O> Default for MultiBarrier<O> {
+impl<O> MultiBarrier<O> {
     /// Creates a new empty barrier
-    fn default() -> Self {
+    #[must_use]
+    pub fn new(max_dependencies: usize) -> Self {
         Self {
-            dependencies: Vec::with_capacity(4),
+            max_dependencies,
+            dependencies: UnsafeCell::new(Vec::with_capacity(max_dependencies)),
+            lock: AtomicBool::new(false),
         }
     }
-}
 
-impl<O> MultiBarrier<O> {
+    /// Gets the inner dependencies
+    #[inline]
+    #[must_use]
+    fn get_dependencies(&self) -> &[Arc<O>] {
+        unsafe { self.dependencies.get().as_ref().unwrap() }.as_slice()
+    }
+
     /// Creates a multi barrier that awaits on multiple outputs
     #[must_use]
     pub fn await_on(dependencies: Vec<Arc<O>>) -> Self {
-        Self { dependencies }
+        Self {
+            max_dependencies: dependencies.len(),
+            dependencies: UnsafeCell::new(dependencies),
+            lock: AtomicBool::new(false),
+        }
     }
 
     /// Adds a dependency to this barrier
-    ///
-    /// # Safety
-    ///
-    /// This method is only safe when called during the setup phase of the queue.
-    pub(crate) fn add_dependency(&mut self, output: Arc<O>) {
-        self.dependencies.push(output);
+    pub(crate) fn add_dependency(&self, output: Arc<O>) -> Result<(), Arc<O>> {
+        loop {
+            if self
+                .lock
+                .compare_exchange_weak(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                let deps = unsafe { self.dependencies.get().as_mut().unwrap() };
+                if deps.len() >= self.max_dependencies {
+                    return Err(output);
+                }
+                deps.push(output);
+                self.lock.store(false, Ordering::Relaxed);
+                return Ok(());
+            }
+        }
+    }
+
+    /// Removes a dependency from this barrier
+    pub(crate) fn remove_dependency(&self, output: &Arc<O>) {
+        loop {
+            if self
+                .lock
+                .compare_exchange_weak(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                let deps = unsafe { self.dependencies.get().as_mut().unwrap() };
+                deps.retain(|candidate| !Arc::ptr_eq(candidate, output));
+                self.lock.store(false, Ordering::Relaxed);
+                return;
+            }
+        }
     }
 }
 
@@ -261,15 +316,15 @@ mod tests_multi_barrier {
 
     #[test]
     fn test_next_no_dep() {
-        let barrier = MultiBarrier::<OwnedOutput>::default();
+        let barrier = MultiBarrier::<OwnedOutput>::new(16);
         for i in -1..5_isize {
             assert_eq!(barrier.next(Sequence::from(i)), Sequence::default());
         }
     }
 
     fn test_next_single_dep_with_value(published: isize) {
-        let mut barrier = MultiBarrier::default();
-        barrier.add_dependency(Arc::new(OwnedOutput::new(published)));
+        let barrier = MultiBarrier::new(16);
+        barrier.add_dependency(Arc::new(OwnedOutput::new(published))).unwrap();
         for observer in -1..(published + 4) {
             assert_eq!(barrier.next(Sequence::from(observer)), Sequence::from(published));
         }
@@ -283,9 +338,9 @@ mod tests_multi_barrier {
     }
 
     fn test_next_multi_deps_with_values(published: &[isize], observer: isize, expected: isize) {
-        let mut barrier = MultiBarrier::default();
+        let barrier = MultiBarrier::new(16);
         for &published in published {
-            barrier.add_dependency(Arc::new(OwnedOutput::new(published)));
+            barrier.add_dependency(Arc::new(OwnedOutput::new(published))).unwrap();
         }
         let r = barrier.next(Sequence::from(observer));
         assert_eq!(r, Sequence::from(expected));

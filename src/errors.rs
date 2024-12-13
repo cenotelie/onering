@@ -6,6 +6,30 @@
 
 use core::fmt::{Debug, Display};
 
+/// Error when the maximum number of consumers was reached
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooManyConsumers(pub(crate) usize);
+
+impl TooManyConsumers {
+    /// Gets the maximum number of consumers
+    #[must_use]
+    pub fn get_limit(&self) -> usize {
+        self.0
+    }
+}
+
+impl Display for TooManyConsumers {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "cannot create another consumer because the limit ({}) was reached.",
+            self.0
+        )
+    }
+}
+
+impl core::error::Error for TooManyConsumers {}
+
 /// Error when trying to send an item
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrySendError<T> {

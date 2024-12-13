@@ -105,19 +105,19 @@ mod tests_send_sync {
 
     #[test]
     fn ring_is_send_sync() {
-        let ring = RingBuffer::<usize, _>::new_single_producer(4);
+        let ring = RingBuffer::<usize, _>::new_single_producer(4, 16);
         assert_send(&ring);
         assert_sync(&ring);
     }
 
     #[test]
     fn producers_are_send_sync() {
-        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(4));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(4, 16));
         let producer_single = SingleProducer::new(ring.clone());
         assert_send(&producer_single);
         assert_sync(&producer_single);
 
-        let ring = Arc::new(RingBuffer::<usize, _>::new_multi_producer(4));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_multi_producer(4, 16));
         let producer_concurrent = ConcurrentProducer::new(ring.clone());
         assert_send(&producer_concurrent);
         assert_sync(&producer_concurrent);
@@ -125,7 +125,7 @@ mod tests_send_sync {
 
     #[test]
     fn consumer_is_send_sync() {
-        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(4));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(4, 16));
         let producer_single = SingleProducer::new(ring.clone());
         let consumer = Consumer::new_awaiting_on(&producer_single, ConsumerMode::default());
         assert_send(&consumer);
@@ -151,9 +151,9 @@ mod tests_concurrency_stress {
 
     #[test]
     fn spsc() {
-        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(SCALE_QUEUE_SIZE));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(SCALE_QUEUE_SIZE, 16));
         let mut sender = SingleProducer::new(ring.clone());
-        let mut receiver = Consumer::new(ring.clone(), ConsumerMode::Blocking);
+        let mut receiver = Consumer::new(ring.clone(), ConsumerMode::Blocking).unwrap();
 
         let consumer = std::thread::spawn(move || {
             let mut outputs = Vec::with_capacity(SCALE_MSG_COUNT);
@@ -197,10 +197,10 @@ mod tests_concurrency_stress {
 
     #[test]
     fn spmc() {
-        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(SCALE_QUEUE_SIZE));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(SCALE_QUEUE_SIZE, 16));
         let mut sender = SingleProducer::new(ring.clone());
         let mut receivers = (0..SCALE_CONSUMERS)
-            .map(|_| Consumer::new(ring.clone(), ConsumerMode::Blocking))
+            .map(|_| Consumer::new(ring.clone(), ConsumerMode::Blocking).unwrap())
             .collect::<Vec<_>>();
 
         let consumers = (0..SCALE_CONSUMERS)
@@ -252,12 +252,12 @@ mod tests_concurrency_stress {
 
     #[test]
     fn mpmc() {
-        let ring = Arc::new(RingBuffer::<usize, _>::new_multi_producer(SCALE_QUEUE_SIZE));
+        let ring = Arc::new(RingBuffer::<usize, _>::new_multi_producer(SCALE_QUEUE_SIZE, 16));
         let mut senders = (0..SCALE_PRODUCERS)
             .map(|_| ConcurrentProducer::new(ring.clone()))
             .collect::<Vec<_>>();
         let mut receivers = (0..SCALE_CONSUMERS)
-            .map(|_| Consumer::new(ring.clone(), ConsumerMode::Blocking))
+            .map(|_| Consumer::new(ring.clone(), ConsumerMode::Blocking).unwrap())
             .collect::<Vec<_>>();
 
         let consumers = (0..SCALE_CONSUMERS)

@@ -207,9 +207,10 @@ impl<T> Sender for SpSender<T> {
 /// Creates a single producer, multiple consumers queue.
 /// All consumers receive all items, meaning this is a dispatch queue.
 #[must_use]
-pub fn spmc<T>(queue_size: usize) -> (SpSender<T>, Receiver<T, OwnedOutput>) {
-    let producer = SingleProducer::new(Arc::new(RingBuffer::new_single_producer(queue_size)));
-    let consumer = Consumer::new(producer.ring.clone(), ConsumerMode::Blocking);
+pub fn spmc<T>(queue_size: usize, max_consumers: usize) -> (SpSender<T>, Receiver<T, OwnedOutput>) {
+    assert!(max_consumers >= 1);
+    let producer = SingleProducer::new(Arc::new(RingBuffer::new_single_producer(queue_size, max_consumers)));
+    let consumer = Consumer::new(producer.ring.clone(), ConsumerMode::Blocking).unwrap();
     (SpSender { producer }, Receiver { consumer })
 }
 
@@ -271,9 +272,10 @@ impl<T> Sender for MpSender<T> {
 /// Creates a multiple producers, multiple consumers queue.
 /// All consumers receive all items, meaning this is a dispatch queue.
 #[must_use]
-pub fn mpmc<T>(queue_size: usize) -> (MpSender<T>, Receiver<T, SharedOutput>) {
-    let producer = ConcurrentProducer::new(Arc::new(RingBuffer::new_multi_producer(queue_size)));
-    let consumer = Consumer::new(producer.ring.clone(), ConsumerMode::Blocking);
+pub fn mpmc<T>(queue_size: usize, max_consumers: usize) -> (MpSender<T>, Receiver<T, SharedOutput>) {
+    assert!(max_consumers >= 1);
+    let producer = ConcurrentProducer::new(Arc::new(RingBuffer::new_multi_producer(queue_size, max_consumers)));
+    let consumer = Consumer::new(producer.ring.clone(), ConsumerMode::Blocking).unwrap();
     (MpSender { producer }, Receiver { consumer })
 }
 
@@ -285,7 +287,7 @@ mod tests_send_sync {
 
     #[test]
     fn spmc_are_send_sync_clone() {
-        let (sender, receiver) = super::spmc::<usize>(4);
+        let (sender, receiver) = super::spmc::<usize>(4, 16);
         assert_send(&sender);
         assert_sync(&sender);
 
@@ -296,7 +298,7 @@ mod tests_send_sync {
 
     #[test]
     fn mpmc_are_send_sync_clone() {
-        let (sender, receiver) = super::mpmc::<usize>(4);
+        let (sender, receiver) = super::mpmc::<usize>(4, 16);
         assert_send(&sender);
         assert_sync(&sender);
         assert_clone(&sender);
