@@ -128,25 +128,43 @@ impl<T, PO: Output + 'static, B> ExactSizeIterator for ConsumerAccess<'_, T, PO,
     }
 }
 
+impl<T, PO: Output + 'static, B: Barrier> Consumer<T, PO, B> {
+    /// Creates a new consumer that await on a specific barrier
+    ///
+    /// # Errors
+    ///
+    /// Fail when the ring reached the maximum number of consumers
+    fn new_awaiting_barrier(ring: Arc<RingBuffer<T, PO>>, mode: ConsumerMode, waiting_on: B) -> Result<Self, TooManyConsumers> {
+        let mut last_published = waiting_on.next(Sequence::default());
+        let publish = Arc::new(OwnedOutput::new(last_published.0));
+        if mode == ConsumerMode::Blocking {
+            ring.register_consumer_output(publish.clone())?;
+        }
+        // re-update the barrier
+        last_published = waiting_on.next(Sequence::default());
+        publish.commit(last_published);
+        Ok(Self {
+            shared: ring.consumers_shared.clone(),
+            mode,
+            #[allow(clippy::cast_sign_loss)] // because of +1, the result is always positive
+            next: (last_published.0 + 1) as usize,
+            waiting_on,
+            publish,
+            ring,
+        })
+    }
+}
+
 impl<T, PO: Output + 'static> Consumer<T, PO, SingleBarrier<PO>> {
     /// Creates a new consumer that await for messages from all producers on a ring
     ///
     /// # Errors
     ///
     /// Fail when the ring reached the maximum number of consumers
+    #[inline]
     pub fn new(ring: Arc<RingBuffer<T, PO>>, mode: ConsumerMode) -> Result<Self, TooManyConsumers> {
-        let publish = Arc::new(OwnedOutput::default());
-        if mode == ConsumerMode::Blocking {
-            ring.register_consumer_output(publish.clone())?;
-        }
-        Ok(Self {
-            shared: ring.consumers_shared.clone(),
-            mode,
-            next: 0,
-            waiting_on: ring.producers_barrier.clone(),
-            publish,
-            ring,
-        })
+        let waiting_on = ring.producers_barrier.clone();
+        Self::new_awaiting_barrier(ring, mode, waiting_on)
     }
 }
 
@@ -156,23 +174,14 @@ impl<T, PO: Output + 'static> Consumer<T, PO, SingleBarrier<OwnedOutput>> {
     /// # Errors
     ///
     /// Fail when the ring reached the maximum number of consumers
+    #[inline]
     pub fn new_awaiting_on<U: QueueUser<Item = T, UserOutput = OwnedOutput, ProducerOutput = PO>>(
         other: &U,
         mode: ConsumerMode,
     ) -> Result<Self, TooManyConsumers> {
         let ring = other.queue().clone();
-        let publish = Arc::new(OwnedOutput::default());
-        if mode == ConsumerMode::Blocking {
-            ring.register_consumer_output(publish.clone())?;
-        }
-        Ok(Self {
-            shared: ring.consumers_shared.clone(),
-            mode,
-            next: 0,
-            waiting_on: SingleBarrier::await_on(other.output()),
-            publish,
-            ring,
-        })
+        let waiting_on = SingleBarrier::await_on(other.output());
+        Self::new_awaiting_barrier(ring, mode, waiting_on)
     }
 }
 
@@ -196,18 +205,8 @@ impl<T, PO: Output + 'static> Consumer<T, PO, MultiBarrier<OwnedOutput>> {
             })
             .collect::<Vec<_>>();
         let ring = ring.unwrap();
-        let publish = Arc::new(OwnedOutput::default());
-        if mode == ConsumerMode::Blocking {
-            ring.register_consumer_output(publish.clone())?;
-        }
-        Ok(Self {
-            shared: ring.consumers_shared.clone(),
-            mode,
-            next: 0,
-            waiting_on: MultiBarrier::await_on(outputs),
-            publish,
-            ring,
-        })
+        let waiting_on = MultiBarrier::await_on(outputs);
+        Self::new_awaiting_barrier(ring, mode, waiting_on)
     }
 }
 
@@ -327,6 +326,34 @@ impl<T, PO: Output + 'static, B: Barrier> Consumer<T, PO, B> {
         self.next = last_id + 1;
         self.publish.commit(Sequence::from(last_id));
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests_new {
+    use alloc::sync::Arc;
+
+    use super::{Consumer, ConsumerMode};
+    use crate::queue::{Output, RingBuffer, Sequence, SingleProducer};
+
+    #[test]
+    fn new_consumer_empty_ring() {
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(4, 16));
+        let _producer = SingleProducer::new(ring.clone());
+        let consumer = Consumer::new(ring, ConsumerMode::default()).unwrap();
+        assert_eq!(consumer.next, 0);
+        assert_eq!(consumer.publish.published(), Sequence::default());
+    }
+
+    #[test]
+    fn new_consumer_some_items() {
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(4, 16));
+        let mut producer = SingleProducer::new(ring.clone());
+        producer.try_push(0).unwrap();
+        producer.try_push(1).unwrap();
+        let consumer = Consumer::new(ring, ConsumerMode::default()).unwrap();
+        assert_eq!(consumer.next, 2);
+        assert_eq!(consumer.publish.published(), Sequence::from(1_isize));
     }
 }
 

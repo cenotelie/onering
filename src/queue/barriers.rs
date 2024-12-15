@@ -7,8 +7,7 @@
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::fmt::Debug;
-use core::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use crossbeam_utils::CachePadded;
 
