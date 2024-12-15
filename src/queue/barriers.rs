@@ -280,6 +280,7 @@ impl<O> MultiBarrier<O> {
             {
                 let deps = unsafe { self.dependencies.get().as_mut().unwrap() };
                 if deps.len() >= self.max_dependencies {
+                    self.lock.store(false, Ordering::Relaxed);
                     return Err(output);
                 }
                 deps.push(output);
