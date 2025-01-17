@@ -4,7 +4,7 @@ use std::time::Duration;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use crossbeam_utils::Backoff;
 use onering::errors::TryRecvError;
-use onering::queue::{Consumer, ConsumerMode, RingBuffer, SingleProducer};
+use onering::queue::{ConcurrentProducer, Consumer, ConsumerMode, RingBuffer, SingleProducer};
 
 /// The size of the queue to use
 pub const SCALE_QUEUE_SIZE: usize = 256;
@@ -97,11 +97,60 @@ fn queue_spmc() {
     }
 }
 
+fn queue_mpmc() {
+    let ring = Arc::new(RingBuffer::<usize, _>::new_multi_producer(SCALE_QUEUE_SIZE, 16));
+    let mut consumers = (0..SCALE_CONSUMERS)
+        .map(|_| Consumer::new(ring.clone(), ConsumerMode::Blocking).unwrap())
+        .collect::<Vec<_>>();
+
+    let consumer_threads = (0..SCALE_CONSUMERS)
+        .map(|_| {
+            let mut consumer = consumers.pop().unwrap();
+            std::thread::spawn({
+                move || {
+                    let mut count = 0;
+                    while count < SCALE_MSG_COUNT {
+                        let waiting = consumer.get_number_of_items();
+                        if waiting < 20 && count + waiting < SCALE_MSG_COUNT {
+                            let backoff = Backoff::new();
+                            backoff.spin();
+                            continue;
+                        }
+                        if let Ok(items) = consumer.try_recv() {
+                            count += items.len();
+                        }
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let producers = (0..SCALE_PRODUCERS)
+        .map(|p| {
+            let mut producer = ConcurrentProducer::new(ring.clone());
+            std::thread::spawn(move || {
+                for i in 0..(SCALE_MSG_COUNT / SCALE_PRODUCERS) {
+                    while producer.try_push((p * SCALE_MSG_COUNT / SCALE_PRODUCERS) + i).is_err() {}
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for producer in producers {
+        producer.join().unwrap();
+    }
+
+    for consumer in consumer_threads {
+        consumer.join().unwrap();
+    }
+}
+
 pub fn bench_disruptor_queue(c: &mut Criterion) {
     let mut group = c.benchmark_group("queue");
     group.throughput(Throughput::Elements(SCALE_MSG_COUNT as u64));
     group.bench_function("queue_spsc", |b| b.iter(queue_spsc));
     group.bench_function("queue_spmc", |b| b.iter(queue_spmc));
+    group.bench_function("queue_mpmc", |b| b.iter(queue_mpmc));
     group.finish();
 }
 

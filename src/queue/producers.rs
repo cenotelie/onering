@@ -375,7 +375,7 @@ impl<T> ConcurrentProducer<T> {
             // try to acquire
             if let Err(real_next) = self
                 .shared_next
-                .compare_exchange_weak(next, next + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .compare_exchange(next, next + 1, Ordering::AcqRel, Ordering::Relaxed)
             {
                 next = real_next;
                 backoff.spin(); // wait a bit
@@ -394,7 +394,6 @@ impl<T> ConcurrentProducer<T> {
                 .is_err()
             {
                 // wait for other producers to write and publish
-                backoff.spin();
             }
             return Ok(());
         }

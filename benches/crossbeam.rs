@@ -40,11 +40,7 @@ fn crossbeam_spmc() {
     let consumers = (0..SCALE_CONSUMERS)
         .map(|_| {
             let receiver = receiver.clone();
-            std::thread::spawn({
-                move || {
-                    while let Ok(_item) = receiver.recv() {}
-                }
-            })
+            std::thread::spawn(move || while let Ok(_item) = receiver.recv() {})
         })
         .collect::<Vec<_>>();
 
@@ -58,11 +54,43 @@ fn crossbeam_spmc() {
     }
 }
 
+fn crossbeam_mpmc() {
+    let (sender, receiver) = crossbeam::channel::bounded(SCALE_QUEUE_SIZE);
+
+    let consumers = (0..SCALE_CONSUMERS)
+        .map(|_| {
+            let receiver = receiver.clone();
+            std::thread::spawn(move || while let Ok(_item) = receiver.recv() {})
+        })
+        .collect::<Vec<_>>();
+
+    let producers = (0..SCALE_PRODUCERS)
+        .map(|p| {
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                for i in 0..(SCALE_MSG_COUNT / SCALE_PRODUCERS) {
+                    while sender.send((p * SCALE_MSG_COUNT / SCALE_PRODUCERS) + i).is_err() {}
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    drop(sender);
+    for producer in producers {
+        producer.join().unwrap();
+    }
+
+    for consumer in consumers {
+        consumer.join().unwrap();
+    }
+}
+
 pub fn bench_crossbeam(c: &mut Criterion) {
     let mut group = c.benchmark_group("crossbeam");
     group.throughput(Throughput::Elements(SCALE_MSG_COUNT as u64));
     group.bench_function("crossbeam_spsc", |b| b.iter(crossbeam_spsc));
     group.bench_function("crossbeam_spmc", |b| b.iter(crossbeam_spmc));
+    group.bench_function("crossbeam_mpmc", |b| b.iter(crossbeam_mpmc));
     group.finish();
 }
 
