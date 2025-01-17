@@ -103,44 +103,44 @@ impl<T> SingleProducer<T> {
         Ok(())
     }
 
-    // /// Attempts to push multiple items coming from an iterator into the queue
-    // ///
-    // /// # Errors
-    // ///
-    // /// This returns a `TrySendError` when the queue is full or there no longer are any consumer when no item at all could be pushed
-    // pub fn try_push_iterator<I>(&mut self, provider: &mut I) -> Result<usize, TrySendError<()>>
-    // where
-    //     I: Iterator<Item = T>,
-    // {
-    //     let consumers_min = self.ring.get_last_seen_by_all_blocking_consumers(self.next);
-    //     let current_count = self.next - if consumers_min < 0 { 0 } else { consumers_min.unsigned_abs() };
-    //     let buffer_len = self.ring.buffer.len();
-    //     if current_count >= buffer_len {
-    //         // buffer is full
-    //         if self.ring.get_connected_consumers() == 0 {
-    //             return Err(TrySendError::Disconnected(()));
-    //         }
-    //         return Err(TrySendError::Full(()));
-    //     }
-    //     let free = buffer_len - current_count;
-    //     let mut pushed = 0;
-    //     for _ in 0..free {
-    //         if let Some(item) = provider.next() {
-    //             self.ring.write_slot(self.next, item);
-    //             self.next += 1;
-    //             pushed += 1;
-    //         } else {
-    //             break;
-    //         }
-    //     }
-    //     if pushed == 0 {
-    //         println!("nodata");
-    //         Err(TrySendError::NoData)
-    //     } else {
-    //         self.publish.write(self.next);
-    //         Ok(pushed)
-    //     }
-    // }
+    /// Attempts to push multiple items onto the queues when `T` is `Copy`
+    ///
+    /// # Errors
+    ///
+    /// This returns a `TrySendError` when the queue is full or there no longer are any consumer
+    pub fn try_push_copies(&mut self, items: &[T]) -> Result<usize, TrySendError<()>>
+    where
+        T: Copy,
+    {
+        let last_seq = self
+            .ring
+            .get_next_after_all_consumers_with_cache(Sequence::from(self.next), &mut self.cache_last_seq);
+        let current_count = if last_seq.is_valid_item() {
+            self.next - last_seq.as_index() - 1
+        } else {
+            self.next
+        };
+        if current_count >= self.ring.capacity() {
+            // buffer is full
+            if self.ring.get_connected_consumers() == 0 {
+                return Err(TrySendError::Disconnected(()));
+            }
+            return Err(TrySendError::Full(()));
+        }
+        // compute the number of items to write
+        let available = self.ring.capacity() - current_count;
+        let to_write = available.min(items.len());
+        if to_write == 0 {
+            return Err(TrySendError::NoData);
+        }
+        // write
+        for (i, item) in items[..to_write].iter().enumerate() {
+            self.ring.write_slot(self.next + i, *item);
+        }
+        self.publish.commit(Sequence::from(self.next + to_write - 1));
+        self.next += to_write;
+        Ok(to_write)
+    }
 }
 
 #[cfg(test)]
@@ -396,6 +396,80 @@ impl<T> ConcurrentProducer<T> {
                 // wait for other producers to write and publish
             }
             return Ok(());
+        }
+    }
+
+    /// Attempts to push multiple items onto the queues when `T` is `Copy`
+    ///
+    /// # Errors
+    ///
+    /// This returns a `TrySendError` when the queue is full or there no longer are any consumer
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn try_push_copies(&mut self, items: &[T]) -> Result<usize, TrySendError<()>>
+    where
+        T: Copy,
+    {
+        let backoff = Backoff::new();
+        let mut next = self.shared_next.load(Ordering::Acquire);
+        let last_seq = self
+            .ring
+            .get_next_after_all_consumers_with_cache(Sequence::from(next), &mut self.cache_last_seq);
+
+        loop {
+            let current_count = if last_seq.is_valid_item() {
+                let last_seq_index = last_seq.as_index();
+                if last_seq_index >= next {
+                    // this producer is waaaay late
+                    next = self.shared_next.load(Ordering::Acquire);
+                    continue;
+                }
+                next - last_seq_index - 1
+            } else {
+                next
+            };
+            if current_count >= self.ring.capacity() {
+                // buffer is full
+                if self.ring.get_connected_consumers() == 0 {
+                    return Err(TrySendError::Disconnected(()));
+                }
+                return Err(TrySendError::Full(()));
+            }
+
+            // compute the number of items to write
+            let available = self.ring.capacity() - current_count;
+            let to_write = available.min(items.len());
+            if to_write == 0 {
+                return Err(TrySendError::NoData);
+            }
+
+            // try to acquire
+            if let Err(real_next) =
+                self.shared_next
+                    .compare_exchange(next, next + to_write, Ordering::AcqRel, Ordering::Relaxed)
+            {
+                next = real_next;
+                backoff.spin(); // wait a bit
+                continue;
+            }
+
+            // write
+            for (i, item) in items[..to_write].iter().enumerate() {
+                self.ring.write_slot(next + i, *item);
+            }
+
+            // publish
+            let next_signed = next as isize;
+            while self
+                .publish
+                .try_commit(
+                    Sequence::from(next_signed - 1),
+                    Sequence::from(next_signed + to_write as isize - 1),
+                )
+                .is_err()
+            {
+                // wait for other producers to write and publish
+            }
+            return Ok(to_write);
         }
     }
 }

@@ -14,6 +14,15 @@ pub const SCALE_MSG_COUNT: usize = 1_000_000;
 pub const SCALE_PRODUCERS: usize = 5;
 /// The number of consumers in a multiple producers, singe consumer test
 pub const SCALE_CONSUMERS: usize = 5;
+/// The maximum number of items to push onto the queue at the same time
+pub const SCALE_BUFFER_SIZE: usize = 16;
+
+#[inline]
+fn fill_buffer(buffer: &mut [usize], start: usize) {
+    for (i, item) in buffer.iter_mut().enumerate() {
+        *item = start + i;
+    }
+}
 
 fn queue_spsc() {
     let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(SCALE_QUEUE_SIZE, 16));
@@ -52,8 +61,13 @@ fn queue_spsc() {
         }
     });
 
-    for i in 0..SCALE_MSG_COUNT {
-        while producer.try_push(i).is_err() {}
+    let mut i = 0;
+    let mut buffer = [0; SCALE_BUFFER_SIZE];
+    while i < SCALE_MSG_COUNT {
+        fill_buffer(&mut buffer, i);
+        if let Ok(count) = producer.try_push_copies(&buffer) {
+            i += count;
+        }
     }
 
     consumer.join().unwrap();
@@ -88,8 +102,13 @@ fn queue_spmc() {
         })
         .collect::<Vec<_>>();
 
-    for item in 0..SCALE_MSG_COUNT {
-        while producer.try_push(item).is_err() {}
+    let mut i = 0;
+    let mut buffer = [0; SCALE_BUFFER_SIZE];
+    while i < SCALE_MSG_COUNT {
+        fill_buffer(&mut buffer, i);
+        if let Ok(count) = producer.try_push_copies(&buffer) {
+            i += count;
+        }
     }
 
     for consumer in consumer_threads {
@@ -129,8 +148,13 @@ fn queue_mpmc() {
         .map(|p| {
             let mut producer = ConcurrentProducer::new(ring.clone());
             std::thread::spawn(move || {
-                for i in 0..(SCALE_MSG_COUNT / SCALE_PRODUCERS) {
-                    while producer.try_push((p * SCALE_MSG_COUNT / SCALE_PRODUCERS) + i).is_err() {}
+                let mut i = 0;
+                let mut buffer = [0; SCALE_BUFFER_SIZE];
+                while i < SCALE_MSG_COUNT / SCALE_PRODUCERS {
+                    fill_buffer(&mut buffer, (p * SCALE_MSG_COUNT / SCALE_PRODUCERS) + i);
+                    if let Ok(count) = producer.try_push_copies(&buffer) {
+                        i += count;
+                    }
                 }
             })
         })
