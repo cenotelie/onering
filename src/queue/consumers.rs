@@ -317,7 +317,7 @@ impl<T, PO: Output + 'static, B: Barrier> Consumer<T, PO, B> {
         let end_of_buffer = self.next + buffer.len() - 1;
         let end_of_ring = self.next | self.ring.mask;
         let last_id = published.min(end_of_buffer).min(end_of_ring);
-        let count = last_id - self.next + 1;
+        let count = last_id + 1 - self.next;
         #[allow(clippy::range_plus_one)]
         let items = self
             .ring
@@ -486,5 +486,47 @@ mod test_recv {
         // up to the end of the ring
         try_recv_copies_with(&[1, 2, 3, 4], 5, 2, &[3, 4]);
         try_recv_copies_with(&[1, 2, 3, 4], 9, 6, &[3, 4]);
+    }
+
+    #[test]
+    fn try_recv_more_than_ring() {
+        // ring size 8 filled 0..8
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(8, 1));
+        for i in 0..8 {
+            ring.write_slot(i, i);
+        }
+        // producer published 18 (16 + 2)
+        let _fake_producer = ring.producers_shared.clone();
+        ring.producers_barrier.get_dependency().commit(Sequence(18));
+        // consumer starts at 12 (8 + 4)
+        let mut consumer = Consumer::new(ring.clone(), ConsumerMode::Blocking).unwrap();
+        consumer.publish.commit(Sequence(11));
+        consumer.next = 12;
+
+        let access = consumer.try_recv().unwrap();
+        assert_eq!(access.len(), 4);
+        for i in 0..4 {
+            assert_eq!(access[i], i + 4);
+        }
+    }
+
+    #[test]
+    fn try_recv_copies_more_than_ring() {
+        // ring size 8 filled 0..8
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(8, 1));
+        for i in 0..8 {
+            ring.write_slot(i, i);
+        }
+        // producer published 18 (16 + 2)
+        let _fake_producer = ring.producers_shared.clone();
+        ring.producers_barrier.get_dependency().commit(Sequence(18));
+        // consumer starts at 12 (8 + 4)
+        let mut consumer = Consumer::new(ring.clone(), ConsumerMode::Blocking).unwrap();
+        consumer.publish.commit(Sequence(11));
+        consumer.next = 12;
+
+        let mut buffer = Vec::new();
+        let count = consumer.try_recv_copies(&mut buffer).unwrap();
+        assert_eq!(count, 0);
     }
 }
