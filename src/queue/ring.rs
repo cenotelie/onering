@@ -9,6 +9,7 @@ use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::ops::Range;
 use core::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use crossbeam_utils::CachePadded;
 
@@ -175,6 +176,28 @@ impl<T, PO: Output + 'static> RingBuffer<T, PO> {
             *cache = self.consumers_barrier.next(observer);
         }
         *cache
+    }
+}
+
+impl<T> RingBuffer<T, SharedOutput> {
+    /// Gets the number of items in the queue
+    #[must_use]
+    #[inline]
+    pub fn get_number_of_items(&self) -> usize {
+        let mut next = self.producers_shared.load(Ordering::Acquire);
+        let last_seq = self.get_next_after_all_consumers(Sequence::from(next));
+        loop {
+            if last_seq.is_valid_item() {
+                let last_seq_index = last_seq.as_index();
+                if last_seq_index < next {
+                    return next - last_seq_index - 1;
+                }
+                // this producer is waaaay late, reload
+                next = self.producers_shared.load(Ordering::Acquire);
+            } else {
+                return next;
+            }
+        }
     }
 }
 

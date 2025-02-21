@@ -324,20 +324,7 @@ impl<T> ConcurrentProducer<T> {
     #[must_use]
     #[inline]
     pub fn get_number_of_items(&self) -> usize {
-        let mut next = self.shared_next.load(Ordering::Acquire);
-        let last_seq = self.ring.get_next_after_all_consumers(Sequence::from(next));
-        loop {
-            if last_seq.is_valid_item() {
-                let last_seq_index = last_seq.as_index();
-                if last_seq_index < next {
-                    return next - last_seq_index - 1;
-                }
-                // this producer is waaaay late, reload
-                next = self.shared_next.load(Ordering::Acquire);
-            } else {
-                return next;
-            }
-        }
+        self.ring.get_number_of_items()
     }
 
     /// Attempts to push a single item onto the queue
