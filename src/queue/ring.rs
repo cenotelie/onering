@@ -13,8 +13,8 @@ use std::sync::atomic::Ordering;
 
 use crossbeam_utils::CachePadded;
 
-use super::barriers::{Barrier, MultiBarrier, Output, OwnedOutput, SharedOutput, SingleBarrier};
 use super::Sequence;
+use super::barriers::{Barrier, MultiBarrier, Output, OwnedOutput, SharedOutput, SingleBarrier};
 use crate::errors::TooManyConsumers;
 
 /// A circular queue to be accessed by producer(s) and consumers

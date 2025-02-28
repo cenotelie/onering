@@ -7,7 +7,7 @@ repository = "https://github.com/cenotelie/onering"
 homepage = "https://github.com/cenotelie/onering"
 documentation = "https://github.com/cenotelie/onering"
 license = "MIT"
-edition = "2021"
+edition = "2024"
 
 [features]
 default = ["std"]

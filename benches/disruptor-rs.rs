@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use disruptor_rs::{DisruptorBuilder, EventHandler, EventProcessorExecutor, EventProducer, ExecutorHandle};
 
 /// The size of the queue to use

@@ -311,8 +311,8 @@ mod tests_multi_barrier {
     use alloc::sync::Arc;
 
     use super::{MultiBarrier, OwnedOutput};
-    use crate::queue::barriers::Barrier;
     use crate::queue::Sequence;
+    use crate::queue::barriers::Barrier;
 
     #[test]
     fn test_next_no_dep() {

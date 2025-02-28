@@ -149,9 +149,9 @@ mod tests_single {
 
     use super::SingleProducer;
     use crate::errors::TrySendError;
+    use crate::queue::Sequence;
     use crate::queue::barriers::{Output, OwnedOutput};
     use crate::queue::ring::RingBuffer;
-    use crate::queue::Sequence;
 
     #[test]
     fn nb_of_items_no_consumer() {
@@ -468,9 +468,9 @@ mod tests_concurrent {
 
     use super::ConcurrentProducer;
     use crate::errors::TrySendError;
+    use crate::queue::Sequence;
     use crate::queue::barriers::{Output, OwnedOutput};
     use crate::queue::ring::RingBuffer;
-    use crate::queue::Sequence;
 
     #[test]
     fn nb_of_items_no_consumer() {

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use crossbeam_utils::Backoff;
 use onering::errors::TryRecvError;
 use onering::queue::{ConcurrentProducer, Consumer, ConsumerMode, RingBuffer, SingleProducer};
