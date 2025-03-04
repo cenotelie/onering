@@ -1,6 +1,6 @@
 [package]
 name = "onering"
-version = "1.3.2"
+version = "1.3.3"
 authors = ["Laurent Wouters <lwouters@cenotelie.fr>"]
 description = "High throughput synchronous queue"
 repository = "https://github.com/cenotelie/onering"
