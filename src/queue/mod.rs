@@ -170,6 +170,9 @@ mod tests_concurrency_stress {
                     Err(TryRecvError::Disconnected) => {
                         break;
                     }
+                    Err(TryRecvError::NoCapacity) => {
+                        panic!("no capacity when no buffer was used")
+                    }
                     Err(TryRecvError::Empty) => {}
                 }
             }
@@ -220,6 +223,9 @@ mod tests_concurrency_stress {
                             }
                             Err(TryRecvError::Disconnected) => {
                                 break;
+                            }
+                            Err(TryRecvError::NoCapacity) => {
+                                panic!("no capacity when no buffer was used")
                             }
                             Err(TryRecvError::Empty) => {}
                         }
@@ -277,6 +283,9 @@ mod tests_concurrency_stress {
                             }
                             Err(TryRecvError::Disconnected) => {
                                 break;
+                            }
+                            Err(TryRecvError::NoCapacity) => {
+                                panic!("no capacity when no buffer was used")
                             }
                             Err(TryRecvError::Empty) => {}
                         }

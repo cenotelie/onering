@@ -99,6 +99,9 @@ impl<T, PO: Output + 'static> Receiver<T, PO> {
                 }
                 Err(TryRecvError::Lagging(count)) => return Err(RecvError::Lagging(count)),
                 Err(TryRecvError::Disconnected) => return Err(RecvError::Disconnected),
+                Err(TryRecvError::NoCapacity) => {
+                    panic!("no capacity when no buffer was used")
+                }
             }
         }
     }

@@ -314,6 +314,10 @@ impl<T, PO: Output + 'static, B: Barrier> Consumer<T, PO, B> {
             return Err(TryRecvError::Lagging(missed));
         }
         // some item are ready
+        if buffer.is_empty() {
+            // but we don't have any capacity
+            return Err(TryRecvError::NoCapacity);
+        }
         let end_of_buffer = self.next + buffer.len() - 1;
         let end_of_ring = self.next | self.ring.mask;
         let last_id = published.min(end_of_buffer).min(end_of_ring);
@@ -526,7 +530,44 @@ mod test_recv {
         consumer.next = 12;
 
         let mut buffer = Vec::new();
-        let count = consumer.try_recv_copies(&mut buffer).unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(consumer.try_recv_copies(&mut buffer), Err(TryRecvError::NoCapacity));
+    }
+
+    #[test]
+    fn try_recv_copies_empty_buffer_new_ring() {
+        // ring size 8 filled 0..8
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(8, 1));
+        for i in 0..8 {
+            ring.write_slot(i, i);
+        }
+        // producer published 15
+        let _fake_producer = ring.producers_shared.clone();
+        ring.producers_barrier.get_dependency().commit(Sequence(15));
+        // consumer starts at 8
+        let mut consumer = Consumer::new(ring.clone(), ConsumerMode::Blocking).unwrap();
+        consumer.publish.commit(Sequence(7));
+        consumer.next = 8;
+
+        let mut buffer = Vec::new();
+        assert_eq!(consumer.try_recv_copies(&mut buffer), Err(TryRecvError::NoCapacity));
+    }
+
+    #[test]
+    fn try_recv_copies_empty_buffer_start() {
+        // ring size 8 filled 0..8
+        let ring = Arc::new(RingBuffer::<usize, _>::new_single_producer(8, 1));
+        for i in 0..8 {
+            ring.write_slot(i, i);
+        }
+        // producer published 3
+        let _fake_producer = ring.producers_shared.clone();
+        ring.producers_barrier.get_dependency().commit(Sequence(3));
+        // consumer starts at 0
+        let mut consumer = Consumer::new(ring.clone(), ConsumerMode::Blocking).unwrap();
+        consumer.publish.commit(Sequence::default());
+        consumer.next = 0;
+
+        let mut buffer = Vec::new();
+        assert_eq!(consumer.try_recv_copies(&mut buffer), Err(TryRecvError::NoCapacity));
     }
 }

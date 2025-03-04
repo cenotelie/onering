@@ -99,6 +99,8 @@ impl<T> From<TrySendError<T>> for SendError<T> {
 /// Error when trying to receive an item
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryRecvError {
+    /// When reading copies, the passed buffer was empty
+    NoCapacity,
     /// A message could not be received because the channel is empty
     Empty,
     /// The receiver lags behind
@@ -110,6 +112,7 @@ pub enum TryRecvError {
 impl Display for TryRecvError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::NoCapacity => write!(f, "failed to receive: input buffer is empty"),
             Self::Empty => write!(f, "failed to receive: the channel is empty"),
             Self::Lagging(count) => write!(f, "failed to receive: lagging behind {count} messages"),
             Self::Disconnected => write!(f, "failed to receive: the channel is disconnected"),
