@@ -238,37 +238,40 @@ impl<T, PO: Output + 'static, B: Barrier> Consumer<T, PO, B> {
         published - self.next + 1
     }
 
-    /// Attempts to receive a single item from the queue
+    /// Attempts to receive available items from the queue
     ///
     /// # Errors
     ///
     /// This returns a `TryRecvError` when the queue is empty, or when there is no longer any producer
     pub fn try_recv(&mut self) -> Result<ConsumerAccess<'_, T, PO, B>, TryRecvError> {
-        let published = self.waiting_on.next(Sequence::from(self.next));
-        if !published.is_valid_item() {
-            // no item was pushed onto the queue
-            if self.ring.get_connected_producers() == 0 {
-                return Err(TryRecvError::Disconnected);
-            }
-            return Err(TryRecvError::Empty);
-        }
-        let published = published.as_index();
-        if published < self.next {
-            // still waiting
-            if self.ring.get_connected_producers() == 0 {
-                return Err(TryRecvError::Disconnected);
-            }
-            return Err(TryRecvError::Empty);
-        }
-        if published >= self.next + self.ring.capacity() {
-            // lagging
-            let missed = published - self.next + 1;
-            self.next = published; // skip
-            return Err(TryRecvError::Lagging(missed));
-        }
+        let published = self.get_published()?;
         // some item are ready
         let end_of_ring = self.next | self.ring.mask;
         let last_id = end_of_ring.min(published);
+        #[allow(clippy::range_plus_one)]
+        let items = self
+            .ring
+            .get_slots((self.next & self.ring.mask)..((last_id & self.ring.mask) + 1));
+        self.next = last_id + 1;
+        Ok(ConsumerAccess {
+            parent: self,
+            last_id: Sequence::from(last_id),
+            items,
+            next: 0,
+        })
+    }
+
+    /// Attempts to receive available items from the queue with a maximum number of items
+    ///
+    /// # Errors
+    ///
+    /// This returns a `TryRecvError` when the queue is empty, or when there is no longer any producer
+    pub fn try_recv_bounded(&mut self, max: usize) -> Result<ConsumerAccess<'_, T, PO, B>, TryRecvError> {
+        let published = self.get_published()?;
+        // some item are ready
+        let end_of_buffer = self.next + max - 1;
+        let end_of_ring = self.next | self.ring.mask;
+        let last_id = published.min(end_of_buffer).min(end_of_ring);
         #[allow(clippy::range_plus_one)]
         let items = self
             .ring
@@ -291,6 +294,31 @@ impl<T, PO: Output + 'static, B: Barrier> Consumer<T, PO, B> {
     where
         T: Copy,
     {
+        let published = self.get_published()?;
+        // some item are ready
+        if buffer.is_empty() {
+            // but we don't have any capacity
+            return Err(TryRecvError::NoCapacity);
+        }
+        let end_of_buffer = self.next + buffer.len() - 1;
+        let end_of_ring = self.next | self.ring.mask;
+        let last_id = published.min(end_of_buffer).min(end_of_ring);
+        let count = last_id + 1 - self.next;
+        #[allow(clippy::range_plus_one)]
+        let items = self
+            .ring
+            .get_slots((self.next & self.ring.mask)..((last_id & self.ring.mask) + 1));
+        buffer[..count].copy_from_slice(items);
+        self.next = last_id + 1;
+        self.publish.commit(Sequence::from(last_id));
+        Ok(count)
+    }
+
+    /// Gets the latest published index, if available
+    ///
+    /// This returns a `TryRecvError` when the queue is empty, or when there is no longer any producer
+    #[inline]
+    fn get_published(&mut self) -> Result<usize, TryRecvError> {
         let published = self.waiting_on.next(Sequence::from(self.next));
         if !published.is_valid_item() {
             // no item was pushed onto the queue
@@ -313,23 +341,7 @@ impl<T, PO: Output + 'static, B: Barrier> Consumer<T, PO, B> {
             self.next = published; // skip
             return Err(TryRecvError::Lagging(missed));
         }
-        // some item are ready
-        if buffer.is_empty() {
-            // but we don't have any capacity
-            return Err(TryRecvError::NoCapacity);
-        }
-        let end_of_buffer = self.next + buffer.len() - 1;
-        let end_of_ring = self.next | self.ring.mask;
-        let last_id = published.min(end_of_buffer).min(end_of_ring);
-        let count = last_id + 1 - self.next;
-        #[allow(clippy::range_plus_one)]
-        let items = self
-            .ring
-            .get_slots((self.next & self.ring.mask)..((last_id & self.ring.mask) + 1));
-        buffer[..count].copy_from_slice(items);
-        self.next = last_id + 1;
-        self.publish.commit(Sequence::from(last_id));
-        Ok(count)
+        Ok(published)
     }
 }
 
