@@ -7,12 +7,14 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crossbeam_utils::{Backoff, CachePadded};
+use crossbeam_utils::CachePadded;
 
 use super::barriers::{Output, OwnedOutput, SharedOutput};
 use super::ring::RingBuffer;
 use super::{QueueUser, Sequence};
 use crate::errors::TrySendError;
+use crate::queue::{SpinWaitStrategy, WaitStrategy};
+use crate::utils::Phantom;
 
 /// A single producer that will be the only producer for a queue
 #[derive(Debug)]
@@ -280,8 +282,9 @@ mod tests_single {
 }
 
 /// A producer for a queue that can be concurrent with other (concurrent) producers
-#[derive(Debug, Clone)]
-pub struct ConcurrentProducer<T> {
+#[derive(Debug)]
+pub struct ConcurrentProducer<T, WS: WaitStrategy = SpinWaitStrategy> {
+    _use_rs: Phantom<WS>,
     /// The identifier of the next message to be inserted in the queue
     shared_next: Arc<CachePadded<AtomicUsize>>,
     /// The owned output used to signal when an item is published
@@ -292,7 +295,19 @@ pub struct ConcurrentProducer<T> {
     pub(crate) ring: Arc<RingBuffer<T, SharedOutput>>,
 }
 
-impl<T> QueueUser for ConcurrentProducer<T> {
+impl<T, WS: WaitStrategy> Clone for ConcurrentProducer<T, WS> {
+    fn clone(&self) -> Self {
+        Self {
+            _use_rs: Phantom::default(),
+            shared_next: self.shared_next.clone(),
+            publish: self.publish.clone(),
+            cache_last_seq: self.cache_last_seq,
+            ring: self.ring.clone(),
+        }
+    }
+}
+
+impl<T, WS: WaitStrategy> QueueUser for ConcurrentProducer<T, WS> {
     type Item = T;
     type UserOutput = SharedOutput;
     type ProducerOutput = SharedOutput;
@@ -311,8 +326,23 @@ impl<T> QueueUser for ConcurrentProducer<T> {
 impl<T> ConcurrentProducer<T> {
     /// Creates a producer for a ring
     #[must_use]
-    pub fn new(ring: Arc<RingBuffer<T, SharedOutput>>) -> Self {
+    pub fn new(ring: Arc<RingBuffer<T, SharedOutput>>) -> ConcurrentProducer<T> {
         Self {
+            _use_rs: Phantom::default(),
+            shared_next: ring.producers_shared.clone(),
+            publish: ring.producers_barrier.get_dependency().clone(),
+            cache_last_seq: Sequence::default(),
+            ring,
+        }
+    }
+}
+
+impl<T, WS: WaitStrategy> ConcurrentProducer<T, WS> {
+    /// Creates a producer for a ring
+    #[must_use]
+    pub fn new_with_strategy(ring: Arc<RingBuffer<T, SharedOutput>>) -> ConcurrentProducer<T, WS> {
+        Self {
+            _use_rs: Phantom::default(),
             shared_next: ring.producers_shared.clone(),
             publish: ring.producers_barrier.get_dependency().clone(),
             cache_last_seq: Sequence::default(),
@@ -333,7 +363,7 @@ impl<T> ConcurrentProducer<T> {
     ///
     /// This returns a `TrySendError` when the queue is full or there no longer are any consumer
     pub fn try_push(&mut self, item: T) -> Result<(), TrySendError<T>> {
-        let backoff = Backoff::new();
+        let backoff = WS::default();
         let mut next = self.shared_next.load(Ordering::Acquire);
         let last_seq = self
             .ring
@@ -365,7 +395,7 @@ impl<T> ConcurrentProducer<T> {
                 .compare_exchange(next, next + 1, Ordering::AcqRel, Ordering::Relaxed)
             {
                 next = real_next;
-                backoff.spin(); // wait a bit
+                backoff.wait(); // wait a bit
                 continue;
             }
 
@@ -396,7 +426,7 @@ impl<T> ConcurrentProducer<T> {
     where
         T: Copy,
     {
-        let backoff = Backoff::new();
+        let backoff = WS::default();
         let mut next = self.shared_next.load(Ordering::Acquire);
         let last_seq = self
             .ring
@@ -435,7 +465,7 @@ impl<T> ConcurrentProducer<T> {
                     .compare_exchange(next, next + to_write, Ordering::AcqRel, Ordering::Relaxed)
             {
                 next = real_next;
-                backoff.spin(); // wait a bit
+                backoff.wait(); // wait a bit
                 continue;
             }
 
