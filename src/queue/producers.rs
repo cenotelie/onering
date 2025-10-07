@@ -13,7 +13,7 @@ use super::barriers::{Output, OwnedOutput, SharedOutput};
 use super::ring::RingBuffer;
 use super::{QueueUser, Sequence};
 use crate::errors::TrySendError;
-use crate::queue::{SpinWaitStrategy, WaitStrategy};
+use crate::queue::{ExponentialSpinWaitStrategy, WaitStrategy};
 use crate::utils::Phantom;
 
 /// A single producer that will be the only producer for a queue
@@ -283,7 +283,7 @@ mod tests_single {
 
 /// A producer for a queue that can be concurrent with other (concurrent) producers
 #[derive(Debug)]
-pub struct ConcurrentProducer<T, WS: WaitStrategy = SpinWaitStrategy> {
+pub struct ConcurrentProducer<T, WS: WaitStrategy = ExponentialSpinWaitStrategy> {
     _use_rs: Phantom<WS>,
     /// The identifier of the next message to be inserted in the queue
     shared_next: Arc<CachePadded<AtomicUsize>>,

@@ -17,7 +17,10 @@ pub use barriers::{MultiBarrier, Output, OwnedOutput, SharedOutput, SingleBarrie
 pub use consumers::{Consumer, ConsumerAccess, ConsumerMode};
 pub use producers::{ConcurrentProducer, SingleProducer};
 pub use ring::RingBuffer;
-pub use wait::{SleepWaitStrategy, SnoozeWaitStrategy, SpinWaitStrategy, WaitStrategy, YieldWaitStrategy};
+pub use wait::{
+    ExponentialSpinWaitStrategy, ImmediateWaitStrategy, LinearBackoffSpinWaitStrategy, PersistentBackoffSpinWaitStrategy,
+    SleepWaitStrategy, SnoozeWaitStrategy, WaitStrategy, YieldWaitStrategy,
+};
 
 /// The position of an item in the queue.
 /// This also uniquely identifies the item within the queue and is used by queue users to keep track of what items are still expected or consumed.
